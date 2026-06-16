@@ -81,9 +81,19 @@ def init_db():
                   box_no TEXT UNIQUE NOT NULL,
                   batch_id INTEGER,
                   status TEXT NOT NULL DEFAULT 'EMPTY',
+                  signed_by INTEGER,
+                  signed_at TIMESTAMP,
+                  prev_status TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (batch_id) REFERENCES batches(id))''')
+                  FOREIGN KEY (batch_id) REFERENCES batches(id),
+                  FOREIGN KEY (signed_by) REFERENCES users(id))''')
+    
+    for col in ['signed_by', 'signed_at', 'prev_status']:
+        try:
+            c.execute(f'ALTER TABLE boxes ADD COLUMN {col}')
+        except sqlite3.OperationalError:
+            pass
     
     c.execute('''CREATE TABLE IF NOT EXISTS archive_box_mapping
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -407,10 +417,12 @@ def sign_box(box_id):
     if operator['role'] != 'RECEIVER':
         return jsonify({'error': '只有接收方账号才能签收，发送方不能代替接收方签收'}), 400
     
-    db.execute("UPDATE boxes SET status = 'SIGNED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box_id,))
+    db.execute("UPDATE boxes SET status = 'SIGNED', signed_by = ?, signed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (operator_id, box_id))
+    
+    signer_name = operator['username']
     add_history(db, box['batch_id'], box_id, '签收档案盒', operator_id, operator['role'],
                box_no=box['box_no'],
-               reason=f'接收方已签收盒子: {box["box_no"]}')
+               reason=f'接收方 {signer_name} 已签收盒子: {box["box_no"]}')
     
     remaining = db.execute("SELECT COUNT(*) as cnt FROM boxes WHERE batch_id = ? AND status != 'SIGNED'", (box['batch_id'],)).fetchone()['cnt']
     if remaining == 0:
@@ -430,8 +442,8 @@ def reject_box(box_id):
     box = db.execute('SELECT * FROM boxes WHERE id = ?', (box_id,)).fetchone()
     if not box:
         return jsonify({'error': '档案盒不存在'}), 404
-    if box['status'] != 'TRANSFERRED':
-        return jsonify({'error': '只有已移交状态的盒子才能退回'}), 400
+    if box['status'] not in ('TRANSFERRED', 'SIGNED'):
+        return jsonify({'error': '只有已移交或已签收状态的盒子才能退回'}), 400
     
     operator_id = data['operator_id']
     operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
@@ -443,15 +455,28 @@ def reject_box(box_id):
     if not reason:
         return jsonify({'error': '退回原因不能为空'}), 400
     
-    db.execute("UPDATE boxes SET status = 'REJECTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box_id,))
+    prev_status = box['status']
+    prev_signed_by = box.get('signed_by')
+    prev_signed_at = box.get('signed_at')
+    
+    db.execute("UPDATE boxes SET status = 'REJECTED', prev_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", 
+               (prev_status, box_id))
     db.execute("UPDATE batches SET status = 'REJECTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box['batch_id'],))
+    
+    status_map = {'TRANSFERRED': '已移交', 'SIGNED': '已签收'}
+    prev_status_name = status_map.get(prev_status, prev_status)
+    snapshot_info = f'退回前状态: {prev_status_name}'
+    if prev_signed_by and prev_signed_at:
+        signer = db.execute('SELECT username FROM users WHERE id = ?', (prev_signed_by,)).fetchone()
+        signer_name = signer['username'] if signer else '未知'
+        snapshot_info += f', 签收人: {signer_name}, 签收时间: {prev_signed_at}'
     
     add_history(db, box['batch_id'], box_id, '退回档案盒', operator_id, operator['role'],
                box_no=box['box_no'],
-               reason=f'退回原因: {reason}')
+               reason=f'退回原因: {reason} | {snapshot_info}')
     
     db.commit()
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'prev_status': prev_status})
 
 @app.route('/api/boxes/<int:box_id>/revoke-reject', methods=['POST'])
 def revoke_reject(box_id):
@@ -468,19 +493,45 @@ def revoke_reject(box_id):
     operator_id = data['operator_id']
     operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
     
-    db.execute("UPDATE boxes SET status = 'TRANSFERRED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box_id,))
+    prev_status = box.get('prev_status') or 'TRANSFERRED'
+    
+    if prev_status == 'SIGNED':
+        last_sign_history = db.execute('''SELECT * FROM transfer_history 
+                                          WHERE box_id = ? AND action = '签收档案盒'
+                                          ORDER BY timestamp DESC LIMIT 1''', (box_id,)).fetchone()
+        if last_sign_history:
+            signed_by = last_sign_history['operator_id']
+            signed_at = last_sign_history['timestamp']
+            db.execute("UPDATE boxes SET status = 'SIGNED', signed_by = ?, signed_at = ?, prev_status = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", 
+                       (signed_by, signed_at, box_id))
+            signer = db.execute('SELECT username FROM users WHERE id = ?', (signed_by,)).fetchone()
+            signer_name = signer['username'] if signer else '未知'
+            add_history(db, box['batch_id'], box_id, '撤销退回', operator_id, operator['role'],
+                       box_no=box['box_no'],
+                       reason=f'撤销退回，盒子 {box["box_no"]} 恢复为"已签收"状态，签收人: {signer_name}，签收时间: {signed_at}')
+        else:
+            db.execute("UPDATE boxes SET status = 'TRANSFERRED', prev_status = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box_id,))
+            add_history(db, box['batch_id'], box_id, '撤销退回', operator_id, operator['role'],
+                       box_no=box['box_no'],
+                       reason=f'撤销退回，未找到签收记录，盒子 {box["box_no"]} 恢复为"已移交"状态')
+    else:
+        db.execute("UPDATE boxes SET status = 'TRANSFERRED', prev_status = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box_id,))
+        add_history(db, box['batch_id'], box_id, '撤销退回', operator_id, operator['role'],
+                   box_no=box['box_no'],
+                   reason=f'撤销退回，盒子 {box["box_no"]} 恢复为"已移交"状态')
     
     all_boxes = db.execute("SELECT * FROM boxes WHERE batch_id = ?", (box['batch_id'],)).fetchall()
     all_rejected = all(bx['status'] == 'REJECTED' for bx in all_boxes)
-    if not all_rejected:
+    all_signed = all(bx['status'] == 'SIGNED' for bx in all_boxes)
+    if all_rejected:
+        db.execute("UPDATE batches SET status = 'REJECTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box['batch_id'],))
+    elif all_signed:
+        db.execute("UPDATE batches SET status = 'SIGNED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box['batch_id'],))
+    else:
         db.execute("UPDATE batches SET status = 'TRANSFERRED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (box['batch_id'],))
     
-    add_history(db, box['batch_id'], box_id, '撤销退回', operator_id, operator['role'],
-               box_no=box['box_no'],
-               reason=f'撤销退回，盒子 {box["box_no"]} 恢复为"已移交"状态')
-    
     db.commit()
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'restored_status': prev_status})
 
 @app.route('/api/history/<int:batch_id>', methods=['GET'])
 def get_history(batch_id):
@@ -552,10 +603,17 @@ def export_batch(batch_id):
     
     if request.method == 'POST':
         data_post = request.json
-        db.execute('''INSERT INTO export_records (batch_id, file_name, content, exported_by)
+        cursor = db.execute('''INSERT INTO export_records (batch_id, file_name, content, exported_by)
                      VALUES (?, ?, ?, ?)''',
                   (batch_id, f'{batch["batch_no"]}_移交清单.csv', content, data_post['operator_id']))
+        export_id = cursor.lastrowid
         db.commit()
+        return jsonify({
+            'success': True,
+            'export_id': export_id,
+            'file_name': f'{batch["batch_no"]}_移交清单.csv',
+            'content': content
+        })
     
     output.seek(0)
     return send_file(

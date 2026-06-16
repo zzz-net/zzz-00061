@@ -327,9 +327,18 @@ tr:hover { background: #f8f9fa; }
                   </button>
                 </div>
 
+                <div v-if="bx.status === 'SIGNED'">
+                  <span class="badge badge-success" style="margin-right: 8px;">
+                    已签收
+                  </span>
+                  <button v-if="currentUser?.role === 'RECEIVER'" class="btn btn-danger btn-sm" @click="showRejectModal(bx.id)">
+                    ✗ 退回（签收后也可退）
+                  </button>
+                </div>
+
                 <div v-if="bx.status === 'REJECTED'">
-                  <button v-if="currentUser?.role === 'RECEIVER'" class="btn btn-warning btn-sm" @click="revokeReject(bx.id)">
-                    ↩ 撤销退回，恢复移交状态
+                  <button v-if="currentUser?.role === 'RECEIVER'" class="btn btn-warning btn-sm" @click="revokeReject(bx)">
+                    ↩ 撤销退回，恢复原状态
                   </button>
                 </div>
               </div>
@@ -648,6 +657,14 @@ createApp({
     }
 
     function showRejectModal(boxId) {
+      const bx = batchDetail.value?.boxes?.find(b => b.id === boxId);
+      let tip = '请填写退回原因。撤销退回时，';
+      if (bx && bx.status === 'SIGNED') {
+        tip += '会自动恢复为"已签收"状态，签收人和签收时间都不会丢失。';
+      } else {
+        tip += '会恢复为"已移交"状态，可以重新签收。';
+      }
+      alert(tip);
       showRejectModalForBox.value = boxId;
       rejectReason.value = '';
     }
@@ -661,7 +678,9 @@ createApp({
 
       const result = await res.json();
       if (res.ok) {
-        showAlert('已退回');
+        const map = { 'TRANSFERRED': '已移交', 'SIGNED': '已签收' };
+        const prevName = map[result.prev_status] || result.prev_status;
+        showAlert(`已退回（退回前状态：${prevName}），撤销可恢复原状态`);
         showRejectModalForBox.value = null;
         viewBatch(selectedBatchId.value);
       } else {
@@ -669,10 +688,18 @@ createApp({
       }
     }
 
-    async function revokeReject(boxId) {
-      if (!confirm('确定要撤销退回吗？盒子将恢复为"已移交"状态，可以重新签收。')) return;
+    async function revokeReject(box) {
+      let confirmMsg = '确定要撤销退回吗？';
+      if (box.prev_status === 'SIGNED') {
+        confirmMsg += '撤销后将恢复为"已签收"状态，签收人、签收时间都会还原。';
+      } else if (box.prev_status === 'TRANSFERRED') {
+        confirmMsg += '撤销后将恢复为"已移交"状态，可以重新签收。';
+      } else {
+        confirmMsg += '撤销后将恢复为"已移交"状态，可以重新签收。';
+      }
+      if (!confirm(confirmMsg)) return;
       
-      const res = await fetch(`${API}/boxes/${boxId}/revoke-reject`, {
+      const res = await fetch(`${API}/boxes/${box.id}/revoke-reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ operator_id: currentUserId.value })
@@ -680,7 +707,9 @@ createApp({
 
       const result = await res.json();
       if (res.ok) {
-        showAlert('已撤销退回，盒子恢复为已移交状态');
+        const map = { 'TRANSFERRED': '已移交', 'SIGNED': '已签收' };
+        const restoredName = map[result.restored_status] || result.restored_status;
+        showAlert(`已撤销退回，盒子恢复为${restoredName}状态`);
         viewBatch(selectedBatchId.value);
       } else {
         showAlert(result.error || '操作失败', 'error');
