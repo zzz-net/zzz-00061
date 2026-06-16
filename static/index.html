@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>档案移交流转台</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #f5f7fa; color: #333; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+.header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px 30px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3); }
+.header h1 { font-size: 28px; font-weight: 600; }
+.header .sub { margin-top: 8px; opacity: 0.9; }
+.user-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 15px 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.user-select { display: flex; align-items: center; gap: 10px; }
+.user-select label { font-weight: 500; color: #555; }
+.role-tag { padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 500; }
+.role-sender { background: #e3f2fd; color: #1976d2; }
+.role-receiver { background: #e8f5e9; color: #388e3c; }
+.tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+.tab { padding: 12px 24px; background: white; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: 500; color: #666; transition: all 0.2s; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+.tab.active { background: #667eea; color: white; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4); }
+.tab:hover:not(.active) { background: #f0f2f5; }
+.card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); margin-bottom: 20px; }
+.card-title { font-size: 18px; font-weight: 600; margin-bottom: 16px; color: #333; display: flex; align-items: center; justify-content: space-between; }
+.status-tag { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+.status-REGISTERED { background: #fff3e0; color: #f57c00; }
+.status-BOXED { background: #e3f2fd; color: #1976d2; }
+.status-TRANSFERRED { background: #f3e5f5; color: #7b1fa2; }
+.status-SIGNED { background: #e8f5e9; color: #388e3c; }
+.status-REJECTED { background: #ffebee; color: #d32f2f; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eef0f3; }
+th { background: #fafbfc; font-weight: 600; color: #555; font-size: 13px; }
+tr:hover { background: #f8f9fa; }
+.btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; display: inline-flex; align-items: center; gap: 4px; }
+.btn-primary { background: #667eea; color: white; }
+.btn-primary:hover { background: #5568d3; }
+.btn-success { background: #43a047; color: white; }
+.btn-success:hover { background: #388e3c; }
+.btn-danger { background: #e53935; color: white; }
+.btn-danger:hover { background: #d32f2f; }
+.btn-warning { background: #fb8c00; color: white; }
+.btn-warning:hover { background: #ef6c00; }
+.btn-secondary { background: #78909c; color: white; }
+.btn-secondary:hover { background: #607d8b; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-sm { padding: 5px 12px; font-size: 13px; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; margin-bottom: 6px; font-weight: 500; color: #555; font-size: 14px; }
+.form-group input, .form-group textarea, .form-group select { width: 100%; padding: 10px 12px; border: 1px solid #dde2eb; border-radius: 6px; font-size: 14px; transition: border-color 0.2s; }
+.form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: #667eea; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.archive-item { display: grid; grid-template-columns: 20px 1fr 1fr 1fr auto; gap: 12px; padding: 10px; background: #f8f9fa; border-radius: 6px; margin-bottom: 8px; align-items: center; }
+.archive-item input { padding: 6px 8px; font-size: 13px; }
+.btn-remove { background: #ffcdd2; color: #c62828; padding: 5px 10px; font-size: 12px; }
+.btn-remove:hover { background: #ef9a9a; }
+.btn-add { background: #c8e6c9; color: #2e7d32; padding: 8px 16px; font-size: 14px; margin-top: 8px; }
+.btn-add:hover { background: #a5d6a7; }
+.box-card { border: 2px solid #e0e0e0; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.box-card.selected { border-color: #667eea; background: #f5f7ff; }
+.box-card.packed { border-color: #43a047; }
+.box-card.rejected { border-color: #e53935; }
+.box-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.box-title { font-weight: 600; font-size: 16px; }
+.archive-checkbox { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: white; border-radius: 6px; margin-bottom: 6px; }
+.archive-checkbox.checked { background: #e8f5e9; }
+.archive-checkbox input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+.timeline { position: relative; padding-left: 30px; }
+.timeline::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: #e0e0e0; }
+.timeline-item { position: relative; margin-bottom: 20px; }
+.timeline-item::before { content: ''; position: absolute; left: -27px; top: 4px; width: 14px; height: 14px; border-radius: 50%; background: #667eea; border: 3px solid white; box-shadow: 0 0 0 2px #667eea; }
+.timeline-time { font-size: 12px; color: #888; margin-bottom: 4px; }
+.timeline-action { font-weight: 600; color: #333; }
+.timeline-operator { font-size: 13px; color: #666; }
+.timeline-reason { background: #f8f9fa; padding: 8px 12px; border-radius: 6px; margin-top: 6px; font-size: 13px; }
+.back-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; background: #f0f2f5; color: #555; border: none; border-radius: 6px; cursor: pointer; margin-bottom: 16px; }
+.back-btn:hover { background: #e0e3e8; }
+.empty-state { text-align: center; padding: 60px 20px; color: #999; }
+.empty-state .icon { font-size: 64px; margin-bottom: 16px; opacity: 0.3; }
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: white; border-radius: 12px; padding: 24px; max-width: 500px; width: 90%; max-height: 90vh; overflow-y: auto; }
+.modal h3 { margin-bottom: 16px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; }
+.alert-error { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
+.alert-success { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
+.info-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+.info-card { background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%); padding: 16px; border-radius: 10px; }
+.info-card .label { font-size: 13px; color: #666; margin-bottom: 4px; }
+.info-card .value { font-size: 20px; font-weight: 600; color: #333; }
+.step-indicator { display: flex; justify-content: space-between; margin-bottom: 24px; position: relative; }
+.step-indicator::before { content: ''; position: absolute; top: 15px; left: 0; right: 0; height: 2px; background: #e0e0e0; z-index: 0; }
+.step { display: flex; flex-direction: column; align-items: center; position: relative; z-index: 1; }
+.step-circle { width: 32px; height: 32px; border-radius: 50%; background: #e0e0e0; color: #888; display: flex; align-items: center; justify-content: center; font-weight: 600; margin-bottom: 6px; }
+.step.active .step-circle { background: #667eea; color: white; }
+.step.completed .step-circle { background: #43a047; color: white; }
+.step-label { font-size: 12px; color: #888; }
+.step.active .step-label { color: #667eea; font-weight: 600; }
+.step.completed .step-label { color: #43a047; }
+.export-record { background: #f5f7fa; padding: 10px 14px; border-radius: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+.export-record .info { font-size: 13px; color: #666; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="container">
+    <div class="header">
+      <h1>📦 档案移交流转台</h1>
+      <div class="sub">批次登记 → 装盒 → 移交 → 签收 → 导出，全流程可追溯</div>
+    </div>
+
+    <div class="user-bar">
+      <div class="user-select">
+        <label>当前用户:</label>
+        <select v-model="currentUserId" style="padding: 8px 12px; border-radius: 6px; border: 1px solid #dde2eb; min-width: 150px;">
+          <option v-for="u in users" :key="u.id" :value="u.id">{{ u.username }} ({{ u.role_name }})</option>
+        </select>
+        <span v-if="currentUser" :class="['role-tag', currentUser.role === 'SENDER' ? 'role-sender' : 'role-receiver']">
+          {{ currentUser.role_name }}
+        </span>
+      </div>
+      <div v-if="alert" :class="['alert', alert.type]">{{ alert.message }}</div>
+    </div>
+
+    <template v-if="!selectedBatchId">
+      <div class="tabs">
+        <button :class="['tab', {active: activeTab === 'list'}]" @click="activeTab = 'list'">批次列表</button>
+        <button :class="['tab', {active: activeTab === 'register'}]" @click="activeTab = 'register'">登记新批次</button>
+      </div>
+
+      <div v-if="activeTab === 'list'" class="card">
+        <div class="card-title">
+          <span>所有批次</span>
+          <button class="btn btn-primary" @click="activeTab = 'register'">+ 登记新批次</button>
+        </div>
+        <div v-if="batches.length === 0" class="empty-state">
+          <div class="icon">📋</div>
+          <div>暂无批次记录，请先登记新批次</div>
+        </div>
+        <table v-else>
+          <thead>
+            <tr>
+              <th>批次号</th>
+              <th>描述</th>
+              <th>档案数量</th>
+              <th>状态</th>
+              <th>创建人</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="b in batches" :key="b.id">
+              <td style="font-weight: 600;">{{ b.batch_no }}</td>
+              <td>{{ b.description || '-' }}</td>
+              <td>{{ b.archive_count }} 份</td>
+              <td><span :class="['status-tag', 'status-' + b.status]">{{ b.status_name }}</span></td>
+              <td>{{ b.creator_name }}</td>
+              <td>{{ b.created_at }}</td>
+              <td>
+                <button class="btn btn-primary btn-sm" @click="viewBatch(b.id)">查看详情</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div v-if="activeTab === 'register'" class="card">
+        <div class="card-title">登记新批次</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>批次号 *</label>
+            <input v-model="newBatch.batch_no" placeholder="请输入批次号">
+          </div>
+          <div class="form-group">
+            <label>描述</label>
+            <input v-model="newBatch.description" placeholder="批次描述（可选）">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>档案列表（档号在同一批次内不能重复）*</label>
+          <div v-for="(arch, idx) in newBatch.archives" :key="idx" class="archive-item">
+            <span style="color: #888;">{{ idx + 1 }}</span>
+            <input v-model="arch.archive_no" placeholder="档号">
+            <input v-model="arch.title" placeholder="题名">
+            <input v-model="arch.remark" placeholder="备注（可选）">
+            <button class="btn btn-remove" @click="removeArchive(idx)" v-if="newBatch.archives.length > 1">删除</button>
+          </div>
+          <button class="btn btn-add" @click="addArchive">+ 添加档案</button>
+        </div>
+
+        <div style="text-align: right;">
+          <button class="btn btn-primary" @click="registerBatch" :disabled="!canRegister">登记批次</button>
+        </div>
+      </div>
+    </template>
+
+    <template v-else>
+      <button class="back-btn" @click="selectedBatchId = null; loadBatches()">← 返回批次列表</button>
+
+      <div v-if="batchDetail" class="card">
+        <div class="card-title">
+          <span>批次详情：{{ batchDetail.batch.batch_no }}</span>
+          <span :class="['status-tag', 'status-' + batchDetail.batch.status]">{{ batchDetail.batch.status_name }}</span>
+        </div>
+
+        <div class="info-grid">
+          <div class="info-card">
+            <div class="label">档案总数</div>
+            <div class="value">{{ batchDetail.archives.length }} 份</div>
+          </div>
+          <div class="info-card">
+            <div class="label">档案盒数</div>
+            <div class="value">{{ batchDetail.boxes.length }} 个</div>
+          </div>
+          <div class="info-card">
+            <div class="label">已装盒</div>
+            <div class="value">{{ packedCount }} / {{ batchDetail.archives.length }}</div>
+          </div>
+        </div>
+
+        <div class="step-indicator">
+          <div :class="['step', {completed: true, active: currentStep >= 1}]">
+            <div class="step-circle">1</div>
+            <div class="step-label">登记</div>
+          </div>
+          <div :class="['step', {completed: currentStep >= 2, active: currentStep === 2}]">
+            <div class="step-circle">2</div>
+            <div class="step-label">装盒</div>
+          </div>
+          <div :class="['step', {completed: currentStep >= 3, active: currentStep === 3}]">
+            <div class="step-circle">3</div>
+            <div class="step-label">移交</div>
+          </div>
+          <div :class="['step', {completed: currentStep >= 4, active: currentStep === 4}]">
+            <div class="step-circle">4</div>
+            <div class="step-label">签收/退回</div>
+          </div>
+          <div :class="['step', {completed: currentStep >= 5, active: currentStep === 5}]">
+            <div class="step-circle">5</div>
+            <div class="step-label">完成导出</div>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
+          <button v-if="batchDetail.batch.status === 'REGISTERED' || batchDetail.batch.status === 'BOXED'" 
+                  class="btn btn-primary" @click="showAddArchiveModal = true">
+            + 添加档案
+          </button>
+          <button v-if="batchDetail.batch.status === 'REGISTERED' || batchDetail.batch.status === 'BOXED'" 
+                  class="btn btn-secondary" @click="showAddBoxModal = true">
+            + 创建档案盒
+          </button>
+          <button v-if="batchDetail.batch.status === 'BOXED' && currentUser?.role === 'SENDER'" 
+                  class="btn btn-success" @click="transferBatch">
+            → 发起移交
+          </button>
+          <button v-if="canExport" class="btn btn-warning" @click="exportBatch">
+            📥 导出移交清单
+          </button>
+        </div>
+
+        <div class="form-row">
+          <div class="card" style="margin: 0;">
+            <div class="card-title">档案列表</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>档号</th>
+                  <th>题名</th>
+                  <th>装入盒号</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="a in batchDetail.archives" :key="a.id">
+                  <td style="font-weight: 500;">{{ a.archive_no }}</td>
+                  <td>{{ a.title }}</td>
+                  <td>{{ a.box_no || '<span style="color:#999;">未装盒</span>' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card" style="margin: 0;">
+            <div class="card-title">档案盒</div>
+            <div v-if="batchDetail.boxes.length === 0" style="color: #999; text-align: center; padding: 20px;">
+              暂无档案盒，请先创建
+            </div>
+            <div v-else>
+              <div v-for="bx in batchDetail.boxes" :key="bx.id" 
+                   :class="['box-card', {selected: selectedBoxId === bx.id, packed: bx.status === 'PACKED' || bx.status === 'SIGNED', rejected: bx.status === 'REJECTED'}]">
+                <div class="box-header">
+                  <div class="box-title">📦 {{ bx.box_no }}</div>
+                  <span :class="['status-tag', 'status-' + bx.status]">{{ bx.status_name }}</span>
+                </div>
+                <div style="margin-bottom: 10px; font-size: 13px; color: #666;">
+                  已装入 {{ bx.archive_count }} 份档案
+                </div>
+
+                <div v-if="(batchDetail.batch.status === 'REGISTERED' || batchDetail.batch.status === 'BOXED') && (bx.status === 'EMPTY' || bx.status === 'PACKED')">
+                  <div style="font-size: 13px; color: #666; margin-bottom: 8px;">选择要装入的档案：</div>
+                  <div v-for="a in batchDetail.archives" :key="a.id">
+                    <label :class="['archive-checkbox', {checked: isArchiveSelected(a.id, bx.id)}]">
+                      <input type="checkbox" 
+                             :checked="isArchiveSelected(a.id, bx.id)"
+                             :disabled="a.box_id && a.box_id !== bx.id"
+                             @change="toggleArchive(a.id, bx.id, $event)">
+                      <span>{{ a.archive_no }} - {{ a.title }}</span>
+                      <span v-if="a.box_id && a.box_id !== bx.id" style="color: #999; font-size: 12px;">(已装入 {{ getBoxNoById(a.box_id) }})</span>
+                    </label>
+                  </div>
+                  <button class="btn btn-primary btn-sm" style="margin-top: 8px;" 
+                          @click="packBox(bx.id)" :disabled="!getSelectedArchives(bx.id).length">
+                    确认装盒
+                  </button>
+                </div>
+
+                <div v-if="bx.status === 'TRANSFERRED'">
+                  <button v-if="currentUser?.role === 'RECEIVER'" class="btn btn-success btn-sm" @click="signBox(bx.id)">
+                    ✓ 签收
+                  </button>
+                  <button v-if="currentUser?.role === 'RECEIVER'" class="btn btn-danger btn-sm" style="margin-left: 8px;" @click="showRejectModal(bx.id)">
+                    ✗ 退回
+                  </button>
+                </div>
+
+                <div v-if="bx.status === 'REJECTED'">
+                  <button v-if="currentUser?.role === 'RECEIVER'" class="btn btn-warning btn-sm" @click="revokeReject(bx.id)">
+                    ↩ 撤销退回，恢复移交状态
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">流转历史记录</div>
+        <div v-if="batchDetail.history.length === 0" style="color: #999; text-align: center; padding: 20px;">
+          暂无历史记录
+        </div>
+        <div v-else class="timeline">
+          <div v-for="h in batchDetail.history" :key="h.id" class="timeline-item">
+            <div class="timeline-time">{{ h.timestamp }}</div>
+            <div class="timeline-action">
+              {{ h.action }}
+              <span v-if="h.box_no" style="color: #667eea; font-weight: 500;">（盒号：{{ h.box_no }}）</span>
+            </div>
+            <div class="timeline-operator">
+              操作人：{{ h.operator_name }} 
+              <span :class="['role-tag', h.operator_role === 'SENDER' ? 'role-sender' : 'role-receiver']" style="margin-left: 6px;">
+                {{ h.operator_role === 'SENDER' ? '发送方' : '接收方' }}
+              </span>
+            </div>
+            <div v-if="h.reason" class="timeline-reason">{{ h.reason }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="exportRecords.length > 0" class="card">
+        <div class="card-title">导出记录</div>
+        <div v-for="er in exportRecords" :key="er.id" class="export-record">
+          <span class="info">{{ er.exported_at }} - {{ er.exporter_name }} 导出了 {{ er.file_name }}</span>
+          <button class="btn btn-secondary btn-sm" @click="downloadExport(er.id)">重新下载</button>
+        </div>
+      </div>
+    </template>
+
+    <div v-if="showAddArchiveModal" class="modal-overlay" @click.self="showAddArchiveModal = false">
+      <div class="modal">
+        <h3>添加档案到批次</h3>
+        <div class="form-group">
+          <label>档号 *</label>
+          <input v-model="newArchive.archive_no" placeholder="档号（同一批次内不能重复）">
+        </div>
+        <div class="form-group">
+          <label>题名 *</label>
+          <input v-model="newArchive.title" placeholder="档案题名">
+        </div>
+        <div class="form-group">
+          <label>备注</label>
+          <textarea v-model="newArchive.remark" placeholder="备注（可选）" rows="3"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showAddArchiveModal = false">取消</button>
+          <button class="btn btn-primary" @click="addArchiveToBatch" :disabled="!newArchive.archive_no || !newArchive.title">添加</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showAddBoxModal" class="modal-overlay" @click.self="showAddBoxModal = false">
+      <div class="modal">
+        <h3>创建档案盒</h3>
+        <div class="form-group">
+          <label>盒号 *</label>
+          <input v-model="newBoxNo" placeholder="盒号（全局唯一）">
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showAddBoxModal = false">取消</button>
+          <button class="btn btn-primary" @click="createBox" :disabled="!newBoxNo">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showRejectModalForBox" class="modal-overlay" @click.self="showRejectModalForBox = null">
+      <div class="modal">
+        <h3>退回档案盒</h3>
+        <div class="form-group">
+          <label>退回原因 *</label>
+          <textarea v-model="rejectReason" placeholder="请详细说明退回原因" rows="4"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showRejectModalForBox = null">取消</button>
+          <button class="btn btn-danger" @click="confirmReject" :disabled="!rejectReason">确认退回</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted } = Vue;
+
+createApp({
+  setup() {
+    const API = 'http://127.0.0.1:5000/api';
+    const users = ref([]);
+    const currentUserId = ref(null);
+    const batches = ref([]);
+    const selectedBatchId = ref(null);
+    const batchDetail = ref(null);
+    const exportRecords = ref([]);
+    const activeTab = ref('list');
+    const alert = ref(null);
+    
+    const newBatch = ref({
+      batch_no: '',
+      description: '',
+      archives: [{ archive_no: '', title: '', remark: '' }]
+    });
+    
+    const selectedBoxId = ref(null);
+    const boxArchiveSelections = ref({});
+    
+    const showAddArchiveModal = ref(false);
+    const showAddBoxModal = ref(false);
+    const showRejectModalForBox = ref(null);
+    const newArchive = ref({ archive_no: '', title: '', remark: '' });
+    const newBoxNo = ref('');
+    const rejectReason = ref('');
+
+    const currentUser = computed(() => users.value.find(u => u.id === currentUserId.value));
+    
+    const canRegister = computed(() => {
+      return newBatch.value.batch_no && 
+             newBatch.value.archives.some(a => a.archive_no && a.title);
+    });
+
+    const currentStep = computed(() => {
+      if (!batchDetail.value) return 1;
+      const s = batchDetail.value.batch.status;
+      if (s === 'REGISTERED') return 1;
+      if (s === 'BOXED') return 2;
+      if (s === 'TRANSFERRED') return 3;
+      if (s === 'REJECTED') return 4;
+      if (s === 'SIGNED') return 5;
+      return 1;
+    });
+
+    const packedCount = computed(() => {
+      if (!batchDetail.value) return 0;
+      return batchDetail.value.archives.filter(a => a.box_id).length;
+    });
+
+    const canExport = computed(() => {
+      if (!batchDetail.value) return false;
+      const s = batchDetail.value.batch.status;
+      return s === 'BOXED' || s === 'TRANSFERRED' || s === 'SIGNED' || s === 'REJECTED';
+    });
+
+    function showAlert(msg, type = 'success') {
+      alert.value = { message: msg, type };
+      setTimeout(() => alert.value = null, 4000);
+    }
+
+    async function fetchUsers() {
+      const res = await fetch(`${API}/users`);
+      users.value = await res.json();
+      if (users.value.length > 0 && !currentUserId.value) {
+        currentUserId.value = users.value[0].id;
+      }
+    }
+
+    async function loadBatches() {
+      const res = await fetch(`${API}/batches`);
+      batches.value = await res.json();
+    }
+
+    async function viewBatch(id) {
+      selectedBatchId.value = id;
+      const res = await fetch(`${API}/batches/${id}`);
+      batchDetail.value = await res.json();
+      boxArchiveSelections.value = {};
+      loadExportRecords(id);
+    }
+
+    function addArchive() {
+      newBatch.value.archives.push({ archive_no: '', title: '', remark: '' });
+    }
+
+    function removeArchive(idx) {
+      newBatch.value.archives.splice(idx, 1);
+    }
+
+    async function registerBatch() {
+      const validArchives = newBatch.value.archives.filter(a => a.archive_no && a.title);
+      if (validArchives.length === 0) {
+        showAlert('请至少填写一份档案信息', 'error');
+        return;
+      }
+
+      const data = {
+        batch_no: newBatch.value.batch_no,
+        description: newBatch.value.description,
+        created_by: currentUserId.value,
+        archives: validArchives
+      };
+
+      const res = await fetch(`${API}/batches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('批次登记成功！');
+        newBatch.value = { batch_no: '', description: '', archives: [{ archive_no: '', title: '', remark: '' }] };
+        activeTab.value = 'list';
+        loadBatches();
+      } else {
+        showAlert(result.error || '登记失败', 'error');
+      }
+    }
+
+    function isArchiveSelected(archiveId, boxId) {
+      const archive = batchDetail.value.archives.find(a => a.id === archiveId);
+      if (archive && archive.box_id === boxId) return true;
+      return boxArchiveSelections.value[boxId]?.includes(archiveId);
+    }
+
+    function toggleArchive(archiveId, boxId, event) {
+      if (!boxArchiveSelections.value[boxId]) {
+        boxArchiveSelections.value[boxId] = [];
+      }
+      const list = boxArchiveSelections.value[boxId];
+      const archive = batchDetail.value.archives.find(a => a.id === archiveId);
+      
+      if (event.target.checked) {
+        if (!archive.box_id && !list.includes(archiveId)) {
+          list.push(archiveId);
+        }
+      } else {
+        const idx = list.indexOf(archiveId);
+        if (idx > -1) list.splice(idx, 1);
+      }
+    }
+
+    function getSelectedArchives(boxId) {
+      const list = boxArchiveSelections.value[boxId] || [];
+      const alreadyPacked = batchDetail.value.archives
+        .filter(a => a.box_id === boxId)
+        .map(a => a.id);
+      return [...new Set([...list, ...alreadyPacked])];
+    }
+
+    function getBoxNoById(boxId) {
+      const bx = batchDetail.value.boxes.find(b => b.id === boxId);
+      return bx ? bx.box_no : '';
+    }
+
+    async function packBox(boxId) {
+      const archiveIds = getSelectedArchives(boxId);
+      if (archiveIds.length === 0) {
+        showAlert('请至少选择一份档案', 'error');
+        return;
+      }
+
+      const res = await fetch(`${API}/boxes/pack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          batch_id: selectedBatchId.value,
+          box_id: boxId,
+          archive_ids: archiveIds,
+          operator_id: currentUserId.value
+        })
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('装盒成功！');
+        boxArchiveSelections.value[boxId] = [];
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '装盒失败', 'error');
+      }
+    }
+
+    async function transferBatch() {
+      if (!confirm('确定要发起移交吗？移交后将不能再修改装盒内容。')) return;
+      
+      const res = await fetch(`${API}/batches/${selectedBatchId.value}/transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator_id: currentUserId.value })
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('移交发起成功！请等待接收方签收。');
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '移交失败', 'error');
+      }
+    }
+
+    async function signBox(boxId) {
+      if (!confirm('确定要签收此档案盒吗？')) return;
+      
+      const res = await fetch(`${API}/boxes/${boxId}/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator_id: currentUserId.value })
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('签收成功！');
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '签收失败', 'error');
+      }
+    }
+
+    function showRejectModal(boxId) {
+      showRejectModalForBox.value = boxId;
+      rejectReason.value = '';
+    }
+
+    async function confirmReject() {
+      const res = await fetch(`${API}/boxes/${showRejectModalForBox.value}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator_id: currentUserId.value, reason: rejectReason.value })
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('已退回');
+        showRejectModalForBox.value = null;
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '退回失败', 'error');
+      }
+    }
+
+    async function revokeReject(boxId) {
+      if (!confirm('确定要撤销退回吗？盒子将恢复为"已移交"状态，可以重新签收。')) return;
+      
+      const res = await fetch(`${API}/boxes/${boxId}/revoke-reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator_id: currentUserId.value })
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('已撤销退回，盒子恢复为已移交状态');
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '操作失败', 'error');
+      }
+    }
+
+    async function addArchiveToBatch() {
+      const res = await fetch(`${API}/batches/${selectedBatchId.value}/archives`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          archive_no: newArchive.value.archive_no,
+          title: newArchive.value.title,
+          remark: newArchive.value.remark,
+          operator_id: currentUserId.value
+        })
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('档案添加成功！');
+        showAddArchiveModal.value = false;
+        newArchive.value = { archive_no: '', title: '', remark: '' };
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '添加失败', 'error');
+      }
+    }
+
+    async function createBox() {
+      const res = await fetch(`${API}/boxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          box_no: newBoxNo.value,
+          batch_id: selectedBatchId.value,
+          operator_id: currentUserId.value
+        })
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('档案盒创建成功！');
+        showAddBoxModal.value = false;
+        newBoxNo.value = '';
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '创建失败', 'error');
+      }
+    }
+
+    async function exportBatch() {
+      await fetch(`${API}/batches/${selectedBatchId.value}/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator_id: currentUserId.value })
+      });
+      
+      window.location.href = `${API}/batches/${selectedBatchId.value}/export`;
+      showAlert('导出成功！');
+      loadExportRecords(selectedBatchId.value);
+    }
+
+    async function loadExportRecords(batchId) {
+      const res = await fetch(`${API}/export-records/${batchId}`);
+      exportRecords.value = await res.json();
+    }
+
+    function downloadExport(batchId) {
+      window.location.href = `${API}/batches/${batchId}/export`;
+    }
+
+    onMounted(() => {
+      fetchUsers();
+      loadBatches();
+    });
+
+    return {
+      users, currentUserId, currentUser, batches, selectedBatchId, batchDetail,
+      activeTab, alert, newBatch, showAddArchiveModal, showAddBoxModal,
+      showRejectModalForBox, newArchive, newBoxNo, rejectReason,
+      exportRecords, currentStep, packedCount, canRegister, canExport,
+      addArchive, removeArchive, registerBatch, viewBatch,
+      isArchiveSelected, toggleArchive, getSelectedArchives, getBoxNoById,
+      packBox, transferBatch, signBox, showRejectModal, confirmReject,
+      revokeReject, addArchiveToBatch, createBox, exportBatch, downloadExport
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
