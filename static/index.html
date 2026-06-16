@@ -778,8 +778,8 @@ createApp({
       exportRecords.value = await res.json();
     }
 
-    function downloadExport(batchId) {
-      window.location.href = `${API}/batches/${batchId}/export`;
+    function downloadExport(exportId) {
+      window.location.href = `${API}/export-records/${exportId}/download`;
     }
 
     onMounted(() => {

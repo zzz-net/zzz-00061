@@ -633,6 +633,20 @@ def get_export_records(batch_id):
                            ORDER BY e.exported_at DESC''', (batch_id,)).fetchall()
     return jsonify(records)
 
+@app.route('/api/export-records/<int:export_id>/download', methods=['GET'])
+def download_export_record(export_id):
+    db = get_db()
+    db.row_factory = dict_factory
+    record = db.execute('SELECT * FROM export_records WHERE id = ?', (export_id,)).fetchone()
+    if not record:
+        return jsonify({'error': '导出记录不存在'}), 404
+    return send_file(
+        io.BytesIO(record['content'].encode('utf-8-sig')),
+        mimetype='text/csv; charset=utf-8-sig',
+        as_attachment=True,
+        download_name=record['file_name']
+    )
+
 if __name__ == '__main__':
     init_db()
     app.run(host='127.0.0.1', port=5000, debug=True)
