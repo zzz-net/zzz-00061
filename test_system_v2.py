@@ -2,7 +2,19 @@ import requests
 import sqlite3
 import time
 import os
+import sys
 from datetime import datetime
+
+# ===== Windows 控制台编码自动适配（不改变用户终端、不删字符、不改代码页）=====
+if sys.platform.startswith('win') and sys.stdout.encoding:
+    enc = sys.stdout.encoding.lower()
+    if 'gbk' in enc or enc == 'cp936' or enc == '936':
+        try:
+            sys.stdout.reconfigure(errors='replace')
+            sys.stderr.reconfigure(errors='replace')
+        except Exception:
+            pass
+# ============================================================================
 
 API = 'http://127.0.0.1:5000/api'
 DB_PATH = 'archive_transfer.db'

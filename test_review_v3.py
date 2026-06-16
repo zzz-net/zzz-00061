@@ -3,7 +3,22 @@ import sqlite3
 import time
 import os
 import csv
+import sys
 from datetime import datetime, timedelta
+
+# ===== Windows 控制台编码自动适配（不改变用户终端、不删字符、不改代码页）=====
+# 解决问题：GBK 无法编码 Unicode 字符(如✓)导致 UnicodeEncodeError 崩溃
+# 原理：保持原有编码(GBK)不变以正确显示中文，仅设置 errors='replace' 让无法编码的
+#       字符(如✓)显示为?而非崩溃。✓字符仍保留在代码中，只是输出时做容错替换。
+if sys.platform.startswith('win') and sys.stdout.encoding:
+    enc = sys.stdout.encoding.lower()
+    if 'gbk' in enc or enc == 'cp936' or enc == '936':
+        try:
+            sys.stdout.reconfigure(errors='replace')
+            sys.stderr.reconfigure(errors='replace')
+        except Exception:
+            pass  # 极老版本 Python 不支持 reconfigure 则忽略
+# ============================================================================
 
 API = 'http://127.0.0.1:5000/api'
 DB_PATH = 'archive_transfer.db'

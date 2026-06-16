@@ -348,7 +348,8 @@ python app.py
 ├── test_system.py       # 基础功能测试（主流程、退回、重复档号、持久化）
 ├── test_system_v2.py    # 签收后退回链路专项测试
 ├── test_export_download.py  # 导出记录串批次回归测试
-└── test_review_v3.py    # 签收后异常复核 全链路回归测试
+├── test_review_v3.py    # 签收后异常复核 全链路回归测试（含关闭人/时间专项）
+└── test_encoding_stability.py  # Windows控制台编码稳定性专项测试
 ```
 
 ### 测试用例总数
@@ -358,5 +359,6 @@ python app.py
 | test_system.py | 主流程+失败链路+基础持久化 | 5 大项 |
 | test_system_v2.py | 签收后退回+双盒混合状态 | 80 项 |
 | test_export_download.py | 导出记录不串批次 | 34 项 |
-| **test_review_v3.py** | **签收后异常复核（新增）** | **101 项** |
-| **合计** | | **220 项全部通过** |
+| **test_review_v3.py** | **签收后异常复核（含关闭人字段专项回归）** | **130 项** |
+| **test_encoding_stability.py** | **Windows 控制台编码稳定性（4场景）** | **39 项** |
+| **合计** | | **288 项全部通过** |
