@@ -2,6 +2,7 @@ import requests
 import sqlite3
 import time
 import os
+import csv
 from datetime import datetime, timedelta
 
 API = 'http://127.0.0.1:5000/api'
@@ -116,10 +117,10 @@ def main():
     detail_14 = requests.get(f'{API}/batches/{bid_14}').json()
     assert_equal(len(detail_14['reviews']), 1, '批次详情中复核项返回1条')
     assert_equal(detail_14['reviews'][0]['status_name'], '待处理', 'status_name字段正确')
-    assert_true(detail_14['review_summary'][box_ids_14[0]]['total'] == 1, '盒1复核摘要total=1')
-    assert_true(detail_14['review_summary'][box_ids_14[0]]['open'] == 1, '盒1复核摘要open=1')
-    assert_true(detail_14['review_summary'][box_ids_14[0]]['closed'] == 0, '盒1复核摘要closed=0')
-    assert_true(detail_14['review_summary'][box_ids_14[1]]['total'] == 0, '盒2无复核项摘要total=0')
+    assert_true(detail_14['review_summary'][str(box_ids_14[0])]['total'] == 1, '盒1复核摘要total=1')
+    assert_true(detail_14['review_summary'][str(box_ids_14[0])]['open'] == 1, '盒1复核摘要open=1')
+    assert_true(detail_14['review_summary'][str(box_ids_14[0])]['closed'] == 0, '盒1复核摘要closed=0')
+    assert_true(detail_14['review_summary'][str(box_ids_14[1])]['total'] == 0, '盒2无复核项摘要total=0')
     
     history_14 = requests.get(f'{API}/history/{bid_14}').json()
     create_his = next((h for h in history_14 if h['action'] == '新建复核项'), None)
@@ -214,8 +215,8 @@ def main():
     assert_true(rv1_final['closed_at'] is not None, '盒1closed_at有值')
     
     detail_16 = requests.get(f'{API}/batches/{bid_16}').json()
-    rs1 = detail_16['review_summary'][box_ids_16[0]]
-    rs2 = detail_16['review_summary'][box_ids_16[1]]
+    rs1 = detail_16['review_summary'][str(box_ids_16[0])]
+    rs2 = detail_16['review_summary'][str(box_ids_16[1])]
     assert_equal(rs1['total'], 1, '盒1复核摘要total=1')
     assert_equal(rs1['open'], 0, '盒1复核摘要open=0（已关闭）')
     assert_equal(rs1['closed'], 1, '盒1复核摘要closed=1')
@@ -431,6 +432,128 @@ def main():
     
     conn.close()
     print(f'{PASS} 21. 数据持久化 - 重启后复核状态一致 - 通过')
+
+    # ============ 测试22：导出复核明细 - 关闭人/关闭时间字段专项回归 ============
+    header('22. 导出复核明细 - 关闭人/关闭时间字段专项回归（4场景）')
+
+    prefix_22 = f'CLOSER{int(time.time()%100000)}'
+    bid_22, box_ids_22, _ = create_full_batch_and_sign(sender['id'], receiver['id'], f'{prefix_22}_C', 2)
+    detail_22 = requests.get(f'{API}/batches/{bid_22}').json()
+    box_id_a = detail_22['boxes'][0]['id']
+    box_id_b = detail_22['boxes'][1]['id']
+    box_no_a = detail_22['boxes'][0]['box_no']
+    box_no_b = detail_22['boxes'][1]['box_no']
+
+    # --- 场景A：box_a 的复核项全流程走到已关闭（有关闭人/关闭时间） ---
+    rv_a = requests.post(f'{API}/reviews', json={
+        'batch_id': bid_22, 'box_id': box_id_a, 'operator_id': receiver['id'],
+        'issue_type': '材料缺页', 'issue_description': f'{prefix_22}_A_已关闭问题',
+        'responsible_party': '档案室',
+    }).json()
+    requests.post(f'{API}/reviews/{rv_a["id"]}/update', json={
+        'operator_id': sender['id'], 'handling_note': f'{prefix_22}_A_处理说明',
+        'status': 'PENDING_CLOSE'
+    })
+    rv_a_closed = requests.post(f'{API}/reviews/{rv_a["id"]}/close', json={
+        'operator_id': receiver['id']
+    }).json()
+    assert_true(rv_a_closed['status'] == 'CLOSED', f'box_a复核项已关闭, id={rv_a["id"]}')
+
+    # --- 场景B：box_b 的复核项保持待处理（未关闭 -> 关闭人/关闭时间必须为空，不能误填） ---
+    rv_b = requests.post(f'{API}/reviews', json={
+        'batch_id': bid_22, 'box_id': box_id_b, 'operator_id': receiver['id'],
+        'issue_type': '标签不清', 'issue_description': f'{prefix_22}_B_待处理问题',
+    }).json()
+    assert_true(rv_b['status'] == 'OPEN', f'box_b复核项保持待处理, id={rv_b["id"]}')
+
+    # --- 场景C：利用测试20/18已产生的历史数据（已存在的已关闭记录），本批次即包含历史记录（通过 export 全量带出） ---
+    r = requests.post(f'{API}/batches/{bid_22}/export', json={'operator_id': sender['id']})
+    assert_true(r.status_code == 200, '导出成功')
+    content = r.json()['content']
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+
+    # 定位"复核项明细"区块
+    idx_detail = next((i for i, ln in enumerate(lines) if '复核项明细' in ln), None)
+    idx_history = next((i for i, ln in enumerate(lines) if '流转历史' in ln), None)
+    assert_true(idx_detail is not None and idx_history is not None and idx_detail < idx_history,
+                'CSV中存在复核项明细区块且位于流转历史之前')
+
+    detail_lines = lines[idx_detail + 1: idx_history]
+    assert_true(len(detail_lines) >= 3, f'复核明细至少含表头+2条数据, 实际{len(detail_lines)}行')
+
+    # --- 场景D：表头和实际内容一致（列数/列名） ---
+    try:
+        header_row = next(csv.reader([detail_lines[0]]))
+    except Exception:
+        header_row = detail_lines[0].split(',')
+    expected_cols = ['复核ID', '盒号', '问题类型', '问题描述', '责任方', '截止时间',
+                     '处理说明', '状态', '提报人', '提报时间', '关闭人', '关闭时间']
+    assert_true(len(header_row) == len(expected_cols),
+                f'表头列数对齐: 期望{len(expected_cols)}列, 实际{len(header_row)}列')
+    for i, (h, exp) in enumerate(zip(header_row, expected_cols)):
+        assert_true(h.strip().strip('"') == exp,
+                    f'表头第{i+1}列匹配: 期望"{exp}", 实际"{h.strip().strip(chr(34))}"')
+    print(f'  [场景D] 表头列名/列数完全一致: {header_row}')
+
+    # --- 场景A断言：已关闭记录 -> 关闭人非空 + 关闭时间非空 + 关闭人等于 receiver.username ---
+    row_a = None
+    for ln in detail_lines[1:]:
+        try:
+            cols = next(csv.reader([ln]))
+        except Exception:
+            cols = ln.split(',')
+        if len(cols) >= 4 and f'{prefix_22}_A_已关闭问题' in cols[3]:
+            row_a = cols
+            break
+    assert_true(row_a is not None, 'CSV中存在box_a已关闭复核项行')
+    closer_a = row_a[10].strip().strip('"')
+    closed_at_a = row_a[11].strip().strip('"')
+    assert_true(len(closer_a) > 0, f'[场景A] 已关闭记录关闭人非空: "{closer_a}"')
+    assert_true(closer_a == receiver['username'],
+                f'[场景A] 关闭人正确: 期望receiver={receiver["username"]}, 实际="{closer_a}"')
+    assert_true(len(closed_at_a) > 0, f'[场景A] 已关闭记录关闭时间非空: "{closed_at_a}"')
+    assert_true(row_a[7].strip().strip('"') == '已关闭', f'[场景A] 状态列显示"已关闭"')
+    print(f'  [场景A] 已关闭记录导出: 关闭人={closer_a}, 关闭时间={closed_at_a}, 状态=已关闭')
+
+    # --- 场景B断言：未关闭记录 -> 关闭人必须为空 + 关闭时间必须为空（不能误填） ---
+    row_b = None
+    for ln in detail_lines[1:]:
+        try:
+            cols = next(csv.reader([ln]))
+        except Exception:
+            cols = ln.split(',')
+        if len(cols) >= 4 and f'{prefix_22}_B_待处理问题' in cols[3]:
+            row_b = cols
+            break
+    assert_true(row_b is not None, 'CSV中存在box_b待处理复核项行')
+    closer_b = row_b[10].strip().strip('"')
+    closed_at_b = row_b[11].strip().strip('"')
+    assert_true(closer_b == '', f'[场景B] 待处理记录关闭人为空, 实际="{closer_b}"')
+    assert_true(closed_at_b == '', f'[场景B] 待处理记录关闭时间为空, 实际="{closed_at_b}"')
+    assert_true(row_b[7].strip().strip('"') != '已关闭', f'[场景B] 状态列不是已关闭')
+    print(f'  [场景B] 待处理记录导出: 关闭人=[空], 关闭时间=[空] ✓')
+
+    # --- 场景C断言：历史数据/已关闭数据 -> 所有状态=已关闭的行, 关闭人与关闭时间都必须非空 ---
+    all_closed_ok = True
+    closed_count = 0
+    for ln in detail_lines[1:]:
+        try:
+            cols = next(csv.reader([ln]))
+        except Exception:
+            cols = ln.split(',')
+        if len(cols) >= 12 and cols[7].strip().strip('"') == '已关闭':
+            closed_count += 1
+            closer = cols[10].strip().strip('"')
+            closed_at = cols[11].strip().strip('"')
+            if len(closer) == 0 or len(closed_at) == 0:
+                all_closed_ok = False
+                print(f'  [场景C] 异常! 已关闭行 id={cols[0]} closer={closer!r} closed_at={closed_at!r}')
+    print(f'  [场景C] 导出中共有 {closed_count} 条已关闭记录, 全部校验通过={all_closed_ok}')
+    assert_true(closed_count >= 1, f'[场景C] 导出中至少有1条已关闭记录, 实际{closed_count}')
+    assert_true(all_closed_ok, '[场景C] 所有已关闭记录的关闭人与关闭时间都必须非空')
+    print(f'  [场景C] 共{closed_count}条已关闭记录（含本批次+历史）, 关闭人/关闭时间全部带出')
+
+    print(f'{PASS} 22. 导出复核明细 - 关闭人/关闭时间字段专项回归 - 4场景全部通过')
 
     # ============ 结果汇总 ============
     print()

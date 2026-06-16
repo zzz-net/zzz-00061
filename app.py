@@ -632,10 +632,11 @@ def export_batch(batch_id):
                            WHERE h.batch_id = ?
                            ORDER BY h.timestamp''', (batch_id,)).fetchall()
     
-    reviews = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name
+    reviews = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name, uc.username as closer_name
                            FROM review_items r
                            JOIN boxes bx ON r.box_id = bx.id
                            JOIN users u ON r.created_by = u.id
+                           LEFT JOIN users uc ON r.closed_by = uc.id
                            WHERE r.batch_id = ?
                            ORDER BY bx.box_no, r.created_at''', (batch_id,)).fetchall()
     
@@ -703,7 +704,7 @@ def export_batch(batch_id):
                 REVIEW_STATUS_NAME.get(r['status'], r['status']),
                 r['creator_name'],
                 r['created_at'],
-                '',
+                r['closer_name'] or '',
                 r['closed_at'] or ''
             ])
     
