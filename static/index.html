@@ -101,6 +101,22 @@ tr:hover { background: #f8f9fa; }
 .step.completed .step-label { color: #43a047; }
 .export-record { background: #f5f7fa; padding: 10px 14px; border-radius: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
 .export-record .info { font-size: 13px; color: #666; }
+.status-OPEN { background: #fff3e0; color: #f57c00; }
+.status-IN_PROGRESS { background: #e3f2fd; color: #1976d2; }
+.status-PENDING_CLOSE { background: #fce4ec; color: #c2185b; }
+.status-CLOSED { background: #e8f5e9; color: #388e3c; }
+.status-REJECTED { background: #ffebee; color: #d32f2f; }
+.review-section { margin-top: 20px; }
+.review-summary-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #f5f7fa; border-radius: 20px; font-size: 13px; }
+.review-card { border: 1px solid #e0e0e0; border-radius: 10px; padding: 16px; margin-bottom: 12px; background: #fafbfc; }
+.review-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+.review-card-title { font-weight: 600; font-size: 15px; color: #333; }
+.review-card-meta { font-size: 12px; color: #888; margin-top: 4px; }
+.review-card-body { font-size: 14px; color: #555; line-height: 1.6; }
+.review-field { margin-bottom: 6px; }
+.review-field label { font-weight: 500; color: #666; }
+.review-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.review-tip { background: #fff8e1; padding: 10px 14px; border-radius: 6px; font-size: 13px; color: #795548; margin-bottom: 12px; border-left: 4px solid #ffc107; }
 </style>
 </head>
 <body>
@@ -298,6 +314,11 @@ tr:hover { background: #f8f9fa; }
                 </div>
                 <div style="margin-bottom: 10px; font-size: 13px; color: #666;">
                   已装入 {{ bx.archive_count }} 份档案
+                  <span v-if="batchDetail.review_summary && batchDetail.review_summary[String(bx.id)] && batchDetail.review_summary[String(bx.id)].total > 0" 
+                        style="margin-left: 10px;" 
+                        class="review-summary-badge">
+                    📋 复核: {{ batchDetail.review_summary[String(bx.id)].open }}待处理/{{ batchDetail.review_summary[String(bx.id)].closed }}已关闭
+                  </span>
                 </div>
 
                 <div v-if="(batchDetail.batch.status === 'REGISTERED' || batchDetail.batch.status === 'BOXED') && (bx.status === 'EMPTY' || bx.status === 'PACKED')">
@@ -370,6 +391,91 @@ tr:hover { background: #f8f9fa; }
         </div>
       </div>
 
+      <div class="card review-section">
+        <div class="card-title">
+          <span>📋 复核单管理</span>
+          <span style="display: flex; align-items: center; gap: 10px;">
+            <span class="review-summary-badge">
+              共{{ batchDetail.reviews?.length || 0 }}项
+              <span style="color:#f57c00;">待处理{{ (batchDetail.reviews || []).filter(r => r.status !== 'CLOSED').length }}</span>
+              <span style="color:#388e3c;">已关闭{{ (batchDetail.reviews || []).filter(r => r.status === 'CLOSED').length }}</span>
+            </span>
+            <button v-if="currentUser?.role === 'RECEIVER'" 
+                    class="btn btn-primary btn-sm" 
+                    @click="openCreateReviewModal">
+              + 新建复核项
+            </button>
+          </span>
+        </div>
+
+        <div v-if="batchDetail.reviews?.length > 0" class="review-tip">
+          <strong>操作说明：</strong>
+          接收方负责<strong>新建、退回、确认关闭、撤销重开</strong>复核项；
+          发送方负责<strong>更新处理结果、申请关闭</strong>。各角色操作不交叉。
+        </div>
+
+        <div v-if="!batchDetail.reviews || batchDetail.reviews.length === 0" style="color: #999; text-align: center; padding: 20px;">
+          暂无复核项记录
+          <span v-if="currentUser?.role === 'RECEIVER'">，点击右上角「新建复核项」登记异常问题</span>
+        </div>
+
+        <div v-for="rv in batchDetail.reviews" :key="rv.id" class="review-card">
+          <div class="review-card-header">
+            <div>
+              <div class="review-card-title">
+                复核项#{{ rv.id }} - 【{{ rv.issue_type }}】
+              </div>
+              <div class="review-card-meta">
+                盒号: {{ rv.box_no }} | 
+                提报人: {{ rv.creator_name }} | 
+                提报时间: {{ rv.created_at }}
+                <span v-if="rv.closed_at"> | 关闭人: {{ rv.closer_name }} | 关闭时间: {{ rv.closed_at }}</span>
+              </div>
+            </div>
+            <span :class="['status-tag', 'status-' + rv.status]">{{ rv.status_name }}</span>
+          </div>
+          <div class="review-card-body">
+            <div class="review-field"><label>问题描述：</label>{{ rv.issue_description }}</div>
+            <div v-if="rv.responsible_party" class="review-field"><label>责任方：</label>{{ rv.responsible_party }}</div>
+            <div v-if="rv.deadline" class="review-field"><label>截止时间：</label>{{ rv.deadline }}</div>
+            <div v-if="rv.handling_note" class="review-field" style="background: #e3f2fd; padding: 8px 10px; border-radius: 6px;">
+              <label>处理说明：</label>{{ rv.handling_note }}
+            </div>
+          </div>
+          <div class="review-actions">
+            <template v-if="currentUser?.role === 'SENDER'">
+              <button v-if="rv.status !== 'CLOSED'" 
+                      class="btn btn-primary btn-sm" 
+                      @click="openUpdateReviewModal(rv)">
+                ✏️ 更新处理结果
+              </button>
+              <button v-if="rv.status !== 'CLOSED' && rv.status !== 'PENDING_CLOSE'" 
+                      class="btn btn-success btn-sm" 
+                      @click="applyForClose(rv)">
+                ✅ 申请关闭
+              </button>
+            </template>
+            <template v-if="currentUser?.role === 'RECEIVER'">
+              <button v-if="rv.status === 'PENDING_CLOSE'" 
+                      class="btn btn-success btn-sm" 
+                      @click="confirmCloseReview(rv)">
+                ✓ 确认关闭
+              </button>
+              <button v-if="rv.status !== 'CLOSED'" 
+                      class="btn btn-danger btn-sm" 
+                      @click="openRejectReviewModal(rv)">
+                ✗ 退回（不认可处理）
+              </button>
+              <button v-if="rv.status === 'CLOSED'" 
+                      class="btn btn-warning btn-sm" 
+                      @click="openReopenReviewModal(rv)">
+                ↩ 撤销重开
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+
       <div v-if="exportRecords.length > 0" class="card">
         <div class="card-title">导出记录</div>
         <div v-for="er in exportRecords" :key="er.id" class="export-record">
@@ -428,6 +534,137 @@ tr:hover { background: #f8f9fa; }
         </div>
       </div>
     </div>
+
+    <div v-if="showCreateReviewModal" class="modal-overlay" @click.self="showCreateReviewModal = false">
+      <div class="modal">
+        <h3>新建复核项（接收方操作）</h3>
+        <div class="form-group">
+          <label>选择档案盒 *</label>
+          <select v-model="newReview.box_id">
+            <option :value="null">请选择问题发生的档案盒</option>
+            <option v-for="bx in batchDetail.boxes" :key="bx.id" :value="bx.id">
+              {{ bx.box_no }}（{{ bx.status_name }}）
+            </option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>问题类型 *</label>
+          <select v-model="newReview.issue_type">
+            <option value="">请选择问题类型</option>
+            <option value="材料缺页">材料缺页</option>
+            <option value="标签不清">标签不清</option>
+            <option value="签收后补件">签收后补件</option>
+            <option value="顺序混乱">顺序混乱</option>
+            <option value="其他问题">其他问题</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>问题描述 *</label>
+          <textarea v-model="newReview.issue_description" 
+                    placeholder="请详细描述问题，包括涉及的档号、具体情况等" rows="3"></textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>责任方（可选）</label>
+            <input v-model="newReview.responsible_party" placeholder="如：归档科、扫描组等">
+          </div>
+          <div class="form-group">
+            <label>处理截止时间（可选）</label>
+            <input v-model="newReview.deadline" type="date">
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showCreateReviewModal = false">取消</button>
+          <button class="btn btn-primary" 
+                  @click="createReview" 
+                  :disabled="!newReview.box_id || !newReview.issue_type || !newReview.issue_description">
+            提交复核项
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showUpdateReviewModal" class="modal-overlay" @click.self="showUpdateReviewModal = null">
+      <div class="modal">
+        <h3>更新复核项处理结果（发送方操作）</h3>
+        <div style="margin-bottom: 16px; padding: 12px; background: #f5f7fa; border-radius: 6px;">
+          <div style="font-weight: 500; margin-bottom: 6px;">
+            复核项#{{ editingReview?.id }} - 【{{ editingReview?.issue_type }}】（{{ editingReview?.box_no }}）
+          </div>
+          <div style="color: #666; font-size: 13px;">问题描述：{{ editingReview?.issue_description }}</div>
+        </div>
+        <div class="form-group">
+          <label>更新处理状态</label>
+          <select v-model="updateReviewData.status">
+            <option value="IN_PROGRESS">处理中（正在处理）</option>
+            <option value="PENDING_CLOSE">申请关闭（处理完成，等待确认）</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>处理说明 * {{ updateReviewData.status === 'PENDING_CLOSE' ? '(申请关闭必填)' : '' }}</label>
+          <textarea v-model="updateReviewData.handling_note" 
+                    placeholder="请填写处理进展或具体处理方式" rows="4"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showUpdateReviewModal = null">取消</button>
+          <button class="btn btn-primary" @click="submitUpdateReview"
+                  :disabled="updateReviewData.status === 'PENDING_CLOSE' && !updateReviewData.handling_note.trim()">
+            提交更新
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showRejectReviewModal" class="modal-overlay" @click.self="showRejectReviewModal = null">
+      <div class="modal">
+        <h3>退回复核项（接收方操作）</h3>
+        <div style="margin-bottom: 16px; padding: 12px; background: #f5f7fa; border-radius: 6px;">
+          <div style="font-weight: 500; margin-bottom: 6px;">
+            复核项#{{ editingReview?.id }} - 【{{ editingReview?.issue_type }}】（{{ editingReview?.box_no }}）
+          </div>
+          <div style="color: #666; font-size: 13px;">
+            当前状态：{{ editingReview?.status_name }}
+          </div>
+        </div>
+        <div class="form-group">
+          <label>退回原因 *</label>
+          <textarea v-model="rejectReviewReason" 
+                    placeholder="请说明不认可处理结果的原因，或需要发送方补充的内容" rows="4"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showRejectReviewModal = null">取消</button>
+          <button class="btn btn-danger" @click="submitRejectReview" :disabled="!rejectReviewReason.trim()">
+            确认退回
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showReopenReviewModal" class="modal-overlay" @click.self="showReopenReviewModal = null">
+      <div class="modal">
+        <h3>撤销重开已关闭复核项（接收方操作）</h3>
+        <div style="margin-bottom: 16px; padding: 12px; background: #f5f7fa; border-radius: 6px;">
+          <div style="font-weight: 500; margin-bottom: 6px;">
+            复核项#{{ editingReview?.id }} - 【{{ editingReview?.issue_type }}】（{{ editingReview?.box_no }}）
+          </div>
+          <div style="color: #666; font-size: 13px;">问题描述：{{ editingReview?.issue_description }}</div>
+          <div v-if="editingReview?.handling_note" style="color: #666; font-size: 13px; margin-top: 4px;">
+            处理说明：{{ editingReview?.handling_note }}
+          </div>
+        </div>
+        <div class="form-group">
+          <label>撤销重开原因 *</label>
+          <textarea v-model="reopenReviewReason" 
+                    placeholder="请说明为什么需要重新打开此复核项" rows="4"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showReopenReviewModal = null">取消</button>
+          <button class="btn btn-warning" @click="submitReopenReview" :disabled="!reopenReviewReason.trim()">
+            确认撤销重开
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -461,6 +698,25 @@ createApp({
     const newArchive = ref({ archive_no: '', title: '', remark: '' });
     const newBoxNo = ref('');
     const rejectReason = ref('');
+    
+    const showCreateReviewModal = ref(false);
+    const showUpdateReviewModal = ref(false);
+    const showRejectReviewModal = ref(false);
+    const showReopenReviewModal = ref(false);
+    const editingReview = ref(null);
+    const newReview = ref({
+      box_id: null,
+      issue_type: '',
+      issue_description: '',
+      responsible_party: '',
+      deadline: ''
+    });
+    const updateReviewData = ref({
+      status: 'IN_PROGRESS',
+      handling_note: ''
+    });
+    const rejectReviewReason = ref('');
+    const reopenReviewReason = ref('');
 
     const currentUser = computed(() => users.value.find(u => u.id === currentUserId.value));
     
@@ -716,6 +972,165 @@ createApp({
       }
     }
 
+    function openCreateReviewModal() {
+      newReview.value = {
+        box_id: batchDetail.value.boxes.length > 0 ? batchDetail.value.boxes[0].id : null,
+        issue_type: '',
+        issue_description: '',
+        responsible_party: '',
+        deadline: ''
+      };
+      showCreateReviewModal.value = true;
+    }
+
+    async function createReview() {
+      const res = await fetch(`${API}/reviews`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          batch_id: selectedBatchId.value,
+          box_id: newReview.value.box_id,
+          operator_id: currentUserId.value,
+          issue_type: newReview.value.issue_type,
+          issue_description: newReview.value.issue_description,
+          responsible_party: newReview.value.responsible_party,
+          deadline: newReview.value.deadline || null
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('复核项创建成功！');
+        showCreateReviewModal.value = false;
+        viewBatch(selectedBatchId.value);
+      } else if (res.status === 409) {
+        showAlert(result.error || '存在相同问题的复核项，请检查后重试', 'error');
+      } else {
+        showAlert(result.error || '创建失败', 'error');
+      }
+    }
+
+    function openUpdateReviewModal(rv) {
+      editingReview.value = rv;
+      updateReviewData.value = {
+        status: rv.status === 'OPEN' ? 'IN_PROGRESS' : rv.status === 'PENDING_CLOSE' ? 'PENDING_CLOSE' : 'IN_PROGRESS',
+        handling_note: rv.handling_note || ''
+      };
+      showUpdateReviewModal.value = true;
+    }
+
+    async function submitUpdateReview() {
+      const res = await fetch(`${API}/reviews/${editingReview.value.id}/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operator_id: currentUserId.value,
+          handling_note: updateReviewData.value.handling_note,
+          status: updateReviewData.value.status
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('处理结果已更新！');
+        showUpdateReviewModal.value = false;
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '更新失败', 'error');
+      }
+    }
+
+    async function applyForClose(rv) {
+      if (!rv.handling_note || !rv.handling_note.trim()) {
+        showAlert('申请关闭前必须先填写处理说明，请先点击"更新处理结果"填写', 'error');
+        openUpdateReviewModal(rv);
+        return;
+      }
+      if (!confirm('确定要申请关闭此复核项吗？接收方确认后才会正式关闭。')) return;
+      const res = await fetch(`${API}/reviews/${rv.id}/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operator_id: currentUserId.value,
+          handling_note: rv.handling_note,
+          status: 'PENDING_CLOSE'
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('已提交关闭申请，等待接收方确认！');
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '操作失败', 'error');
+      }
+    }
+
+    function openRejectReviewModal(rv) {
+      editingReview.value = rv;
+      rejectReviewReason.value = '';
+      showRejectReviewModal.value = true;
+    }
+
+    async function submitRejectReview() {
+      const res = await fetch(`${API}/reviews/${editingReview.value.id}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operator_id: currentUserId.value,
+          reason: rejectReviewReason.value
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('复核项已退回，等待发送方重新处理！');
+        showRejectReviewModal.value = false;
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '操作失败', 'error');
+      }
+    }
+
+    async function confirmCloseReview(rv) {
+      if (!confirm('确定要确认关闭此复核项吗？关闭后如需修改可撤销重开。')) return;
+      const res = await fetch(`${API}/reviews/${rv.id}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operator_id: currentUserId.value
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('复核项已正式关闭！');
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '操作失败', 'error');
+      }
+    }
+
+    function openReopenReviewModal(rv) {
+      editingReview.value = rv;
+      reopenReviewReason.value = '';
+      showReopenReviewModal.value = true;
+    }
+
+    async function submitReopenReview() {
+      const res = await fetch(`${API}/reviews/${editingReview.value.id}/reopen`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operator_id: currentUserId.value,
+          reason: reopenReviewReason.value
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('复核项已撤销重开，重新进入待处理状态！');
+        showReopenReviewModal.value = false;
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '操作失败', 'error');
+      }
+    }
+
     async function addArchiveToBatch() {
       const res = await fetch(`${API}/batches/${selectedBatchId.value}/archives`, {
         method: 'POST',
@@ -791,11 +1206,17 @@ createApp({
       users, currentUserId, currentUser, batches, selectedBatchId, batchDetail,
       activeTab, alert, newBatch, showAddArchiveModal, showAddBoxModal,
       showRejectModalForBox, newArchive, newBoxNo, rejectReason,
+      showCreateReviewModal, showUpdateReviewModal, showRejectReviewModal,
+      showReopenReviewModal, editingReview, newReview, updateReviewData,
+      rejectReviewReason, reopenReviewReason,
       exportRecords, currentStep, packedCount, canRegister, canExport,
       addArchive, removeArchive, registerBatch, viewBatch,
       isArchiveSelected, toggleArchive, getSelectedArchives, getBoxNoById,
       packBox, transferBatch, signBox, showRejectModal, confirmReject,
-      revokeReject, addArchiveToBatch, createBox, exportBatch, downloadExport
+      revokeReject, addArchiveToBatch, createBox, exportBatch, downloadExport,
+      openCreateReviewModal, createReview, openUpdateReviewModal, submitUpdateReview,
+      applyForClose, openRejectReviewModal, submitRejectReview,
+      confirmCloseReview, openReopenReviewModal, submitReopenReview
     };
   }
 }).mount('#app');

@@ -33,6 +33,22 @@ USER_ROLES = {
     'RECEIVER': '接收方'
 }
 
+REVIEW_STATUS = {
+    'OPEN': '待处理',
+    'IN_PROGRESS': '处理中',
+    'PENDING_CLOSE': '申请关闭',
+    'CLOSED': '已关闭',
+    'REJECTED': '已退回'
+}
+
+REVIEW_STATUS_NAME = {
+    'OPEN': '待处理',
+    'IN_PROGRESS': '处理中',
+    'PENDING_CLOSE': '申请关闭待确认',
+    'CLOSED': '已关闭',
+    'REJECTED': '已退回（需重新提报）'
+}
+
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -128,6 +144,33 @@ def init_db():
                   FOREIGN KEY (batch_id) REFERENCES batches(id),
                   FOREIGN KEY (exported_by) REFERENCES users(id))''')
     
+    c.execute('''CREATE TABLE IF NOT EXISTS review_items
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  batch_id INTEGER NOT NULL,
+                  box_id INTEGER NOT NULL,
+                  issue_type TEXT NOT NULL,
+                  issue_description TEXT NOT NULL,
+                  responsible_party TEXT,
+                  handling_note TEXT,
+                  deadline TIMESTAMP,
+                  status TEXT NOT NULL DEFAULT 'OPEN',
+                  created_by INTEGER NOT NULL,
+                  closed_by INTEGER,
+                  closed_at TIMESTAMP,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (batch_id) REFERENCES batches(id),
+                  FOREIGN KEY (box_id) REFERENCES boxes(id),
+                  FOREIGN KEY (created_by) REFERENCES users(id),
+                  FOREIGN KEY (closed_by) REFERENCES users(id))''')
+    
+    for col in ['issue_type', 'responsible_party', 'handling_note', 'deadline', 
+                'closed_by', 'closed_at', 'status']:
+        try:
+            c.execute(f'ALTER TABLE review_items ADD COLUMN {col}')
+        except sqlite3.OperationalError:
+            pass
+    
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO users (username, role) VALUES (?, ?)", ('sender', 'SENDER'))
@@ -205,11 +248,34 @@ def get_batch_detail(batch_id):
                            WHERE h.batch_id = ?
                            ORDER BY h.timestamp DESC''', (batch_id,)).fetchall()
     
+    reviews = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
+                           uc.username as closer_name
+                           FROM review_items r
+                           JOIN boxes bx ON r.box_id = bx.id
+                           JOIN users u ON r.created_by = u.id
+                           LEFT JOIN users uc ON r.closed_by = uc.id
+                           WHERE r.batch_id = ?
+                           ORDER BY r.created_at DESC''', (batch_id,)).fetchall()
+    for rv in reviews:
+        rv['status_name'] = REVIEW_STATUS_NAME.get(rv['status'], rv['status'])
+    
+    review_summary = {}
+    for bx in boxes:
+        box_reviews = [r for r in reviews if r['box_id'] == bx['id']]
+        review_summary[str(bx['id'])] = {
+            'box_id': bx['id'],
+            'total': len(box_reviews),
+            'open': len([r for r in box_reviews if r['status'] in ('OPEN', 'IN_PROGRESS', 'PENDING_CLOSE', 'REJECTED')]),
+            'closed': len([r for r in box_reviews if r['status'] == 'CLOSED'])
+        }
+    
     return jsonify({
         'batch': batch,
         'archives': archives,
         'boxes': boxes,
-        'history': history
+        'history': history,
+        'reviews': reviews,
+        'review_summary': review_summary
     })
 
 @app.route('/api/batches', methods=['POST'])
@@ -566,6 +632,15 @@ def export_batch(batch_id):
                            WHERE h.batch_id = ?
                            ORDER BY h.timestamp''', (batch_id,)).fetchall()
     
+    reviews = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name
+                           FROM review_items r
+                           JOIN boxes bx ON r.box_id = bx.id
+                           JOIN users u ON r.created_by = u.id
+                           WHERE r.batch_id = ?
+                           ORDER BY bx.box_no, r.created_at''', (batch_id,)).fetchall()
+    
+    boxes_list = db.execute('SELECT * FROM boxes WHERE batch_id = ? ORDER BY created_at', (batch_id,)).fetchall()
+    
     output = io.StringIO()
     writer = csv.writer(output)
     
@@ -575,6 +650,12 @@ def export_batch(batch_id):
     writer.writerow([f'创建人: {batch["creator_name"]}'])
     writer.writerow([f'当前状态: {BATCH_STATUS.get(batch["status"], batch["status"])}'])
     writer.writerow([f'创建时间: {batch["created_at"]}'])
+    
+    total_reviews = len(reviews)
+    open_reviews = len([r for r in reviews if r['status'] in ('OPEN', 'IN_PROGRESS', 'PENDING_CLOSE', 'REJECTED')])
+    closed_reviews = len([r for r in reviews if r['status'] == 'CLOSED'])
+    writer.writerow([f'复核项统计: 共{total_reviews}项, 待处理{open_reviews}项, 已关闭{closed_reviews}项'])
+    
     writer.writerow([])
     writer.writerow(['档案详情'])
     writer.writerow(['档号', '题名', '备注', '盒号', '盒子状态'])
@@ -586,6 +667,45 @@ def export_batch(batch_id):
             row['box_no'] or '',
             BOX_STATUS.get(row['status'], row['status']) if row['status'] else ''
         ])
+    
+    writer.writerow([])
+    writer.writerow(['复核摘要'])
+    writer.writerow(['盒号', '复核项总数', '待处理数', '已关闭数', '复核项详情'])
+    for bx in boxes_list:
+        box_reviews = [r for r in reviews if r['box_id'] == bx['id']]
+        box_open = len([r for r in box_reviews if r['status'] in ('OPEN', 'IN_PROGRESS', 'PENDING_CLOSE', 'REJECTED')])
+        box_closed = len([r for r in box_reviews if r['status'] == 'CLOSED'])
+        review_details = '; '.join([
+            f"#{r['id']}[{REVIEW_STATUS_NAME.get(r['status'], r['status'])}] {r['issue_type']}:{r['issue_description'][:30]}"
+            for r in box_reviews
+        ]) if box_reviews else '-'
+        writer.writerow([
+            bx['box_no'],
+            len(box_reviews),
+            box_open,
+            box_closed,
+            review_details
+        ])
+    
+    if reviews:
+        writer.writerow([])
+        writer.writerow(['复核项明细'])
+        writer.writerow(['复核ID', '盒号', '问题类型', '问题描述', '责任方', '截止时间', '处理说明', '状态', '提报人', '提报时间', '关闭人', '关闭时间'])
+        for r in reviews:
+            writer.writerow([
+                r['id'],
+                r['box_no'],
+                r['issue_type'],
+                r['issue_description'],
+                r['responsible_party'] or '',
+                r['deadline'] or '',
+                r['handling_note'] or '',
+                REVIEW_STATUS_NAME.get(r['status'], r['status']),
+                r['creator_name'],
+                r['created_at'],
+                '',
+                r['closed_at'] or ''
+            ])
     
     writer.writerow([])
     writer.writerow(['流转历史'])
@@ -646,6 +766,292 @@ def download_export_record(export_id):
         as_attachment=True,
         download_name=record['file_name']
     )
+
+@app.route('/api/batches/<int:batch_id>/reviews', methods=['GET'])
+def get_reviews(batch_id):
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    batch = db.execute('SELECT * FROM batches WHERE id = ?', (batch_id,)).fetchone()
+    if not batch:
+        return jsonify({'error': '批次不存在'}), 404
+    
+    reviews = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
+                           uc.username as closer_name
+                           FROM review_items r
+                           JOIN boxes bx ON r.box_id = bx.id
+                           JOIN users u ON r.created_by = u.id
+                           LEFT JOIN users uc ON r.closed_by = uc.id
+                           WHERE r.batch_id = ?
+                           ORDER BY r.created_at DESC''', (batch_id,)).fetchall()
+    for rv in reviews:
+        rv['status_name'] = REVIEW_STATUS_NAME.get(rv['status'], rv['status'])
+    return jsonify(reviews)
+
+@app.route('/api/reviews', methods=['POST'])
+def create_review():
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    batch_id = data.get('batch_id')
+    box_id = data.get('box_id')
+    operator_id = data.get('operator_id')
+    issue_type = data.get('issue_type', '').strip()
+    issue_description = data.get('issue_description', '').strip()
+    responsible_party = data.get('responsible_party', '').strip()
+    deadline = data.get('deadline')
+    
+    batch = db.execute('SELECT * FROM batches WHERE id = ?', (batch_id,)).fetchone()
+    if not batch:
+        return jsonify({'error': '批次不存在'}), 404
+    
+    box = db.execute('SELECT * FROM boxes WHERE id = ? AND batch_id = ?', (box_id, batch_id)).fetchone()
+    if not box:
+        return jsonify({'error': '档案盒不存在或不属于该批次'}), 404
+    
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'RECEIVER':
+        return jsonify({'error': '只有接收方才能新建复核项'}), 400
+    
+    if not issue_type or not issue_description:
+        return jsonify({'error': '问题类型和问题描述不能为空'}), 400
+    
+    existing = db.execute('''SELECT * FROM review_items 
+                            WHERE box_id = ? AND issue_type = ? AND status != 'CLOSED'
+                            ORDER BY created_at DESC LIMIT 1''',
+                         (box_id, issue_type)).fetchone()
+    if existing and existing['issue_description'].strip() == issue_description:
+        return jsonify({'error': f'该盒子下已存在相同问题（状态：{REVIEW_STATUS_NAME.get(existing["status"], existing["status"])}），请勿重复提交。如有更新请编辑现有复核项'}), 409
+    
+    try:
+        cursor = db.execute('''INSERT INTO review_items 
+                              (batch_id, box_id, issue_type, issue_description, 
+                               responsible_party, deadline, status, created_by)
+                              VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?)''',
+                           (batch_id, box_id, issue_type, issue_description,
+                            responsible_party or None, deadline or None, operator_id))
+        review_id = cursor.lastrowid
+        
+        add_history(db, batch_id, box_id, '新建复核项', operator_id, operator['role'],
+                   box_no=box['box_no'],
+                   reason=f'复核项#{review_id} [{issue_type}] {issue_description}'
+                   + (f' | 责任方: {responsible_party}' if responsible_party else '')
+                   + (f' | 截止: {deadline}' if deadline else ''))
+        
+        db.commit()
+        
+        review = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name
+                              FROM review_items r
+                              JOIN boxes bx ON r.box_id = bx.id
+                              JOIN users u ON r.created_by = u.id
+                              WHERE r.id = ?''', (review_id,)).fetchone()
+        review['status_name'] = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+        return jsonify(review)
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'创建失败: {str(e)}'}), 500
+
+@app.route('/api/reviews/<int:review_id>/update', methods=['POST'])
+def update_review(review_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (review_id,)).fetchone()
+    if not review:
+        return jsonify({'error': '复核项不存在'}), 404
+    
+    operator_id = data.get('operator_id')
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'SENDER':
+        return jsonify({'error': '只有发送方才能更新复核项处理结果'}), 400
+    
+    if review['status'] == 'CLOSED':
+        return jsonify({'error': '已关闭的复核项不能更新，如需修改请先撤销重开'}), 400
+    
+    handling_note = data.get('handling_note', review.get('handling_note') or '')
+    new_status = data.get('status', review['status'])
+    
+    if new_status not in ('IN_PROGRESS', 'PENDING_CLOSE'):
+        return jsonify({'error': '发送方只能将状态更新为"处理中"或"申请关闭"'}), 400
+    
+    if new_status == 'PENDING_CLOSE' and not handling_note.strip():
+        return jsonify({'error': '申请关闭前必须填写处理说明'}), 400
+    
+    old_status_name = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    new_status_name = REVIEW_STATUS_NAME.get(new_status, new_status)
+    
+    db.execute('''UPDATE review_items 
+                 SET handling_note = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?''',
+              (handling_note or None, new_status, review_id))
+    
+    box = db.execute('SELECT * FROM boxes WHERE id = ?', (review['box_id'],)).fetchone()
+    add_history(db, review['batch_id'], review['box_id'], '更新复核项', operator_id, operator['role'],
+               box_no=box['box_no'] if box else None,
+               reason=f'复核项#{review_id} 状态更新: {old_status_name} → {new_status_name}'
+               + (f' | 处理说明: {handling_note}' if handling_note else ''))
+    
+    db.commit()
+    
+    review = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
+                          uc.username as closer_name
+                          FROM review_items r
+                          JOIN boxes bx ON r.box_id = bx.id
+                          JOIN users u ON r.created_by = u.id
+                          LEFT JOIN users uc ON r.closed_by = uc.id
+                          WHERE r.id = ?''', (review_id,)).fetchone()
+    review['status_name'] = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    return jsonify(review)
+
+@app.route('/api/reviews/<int:review_id>/reject', methods=['POST'])
+def reject_review(review_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (review_id,)).fetchone()
+    if not review:
+        return jsonify({'error': '复核项不存在'}), 404
+    
+    operator_id = data.get('operator_id')
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'RECEIVER':
+        return jsonify({'error': '只有接收方才能退回复核项'}), 400
+    
+    if review['status'] not in ('PENDING_CLOSE', 'IN_PROGRESS', 'OPEN'):
+        return jsonify({'error': f'当前状态（{REVIEW_STATUS_NAME.get(review["status"])}）不能退回'}), 400
+    
+    reason = data.get('reason', '').strip()
+    if not reason:
+        return jsonify({'error': '退回原因不能为空'}), 400
+    
+    old_status_name = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    
+    db.execute('''UPDATE review_items 
+                 SET status = 'REJECTED', updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?''', (review_id,))
+    
+    box = db.execute('SELECT * FROM boxes WHERE id = ?', (review['box_id'],)).fetchone()
+    add_history(db, review['batch_id'], review['box_id'], '退回复核项', operator_id, operator['role'],
+               box_no=box['box_no'] if box else None,
+               reason=f'复核项#{review_id} 状态更新: {old_status_name} → 已退回 | 退回原因: {reason}')
+    
+    db.commit()
+    
+    review = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
+                          uc.username as closer_name
+                          FROM review_items r
+                          JOIN boxes bx ON r.box_id = bx.id
+                          JOIN users u ON r.created_by = u.id
+                          LEFT JOIN users uc ON r.closed_by = uc.id
+                          WHERE r.id = ?''', (review_id,)).fetchone()
+    review['status_name'] = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    return jsonify(review)
+
+@app.route('/api/reviews/<int:review_id>/close', methods=['POST'])
+def close_review(review_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (review_id,)).fetchone()
+    if not review:
+        return jsonify({'error': '复核项不存在'}), 404
+    
+    operator_id = data.get('operator_id')
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'RECEIVER':
+        return jsonify({'error': '只有接收方才能确认关闭复核项'}), 400
+    
+    if review['status'] != 'PENDING_CLOSE':
+        return jsonify({'error': f'只有"申请关闭"状态才能确认关闭，当前状态：{REVIEW_STATUS_NAME.get(review["status"])}'}), 400
+    
+    old_status_name = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    
+    db.execute('''UPDATE review_items 
+                 SET status = 'CLOSED', closed_by = ?, closed_at = CURRENT_TIMESTAMP, 
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?''', (operator_id, review_id))
+    
+    box = db.execute('SELECT * FROM boxes WHERE id = ?', (review['box_id'],)).fetchone()
+    add_history(db, review['batch_id'], review['box_id'], '关闭复核项', operator_id, operator['role'],
+               box_no=box['box_no'] if box else None,
+               reason=f'复核项#{review_id} 状态更新: {old_status_name} → 已关闭')
+    
+    db.commit()
+    
+    review = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
+                          uc.username as closer_name
+                          FROM review_items r
+                          JOIN boxes bx ON r.box_id = bx.id
+                          JOIN users u ON r.created_by = u.id
+                          LEFT JOIN users uc ON r.closed_by = uc.id
+                          WHERE r.id = ?''', (review_id,)).fetchone()
+    review['status_name'] = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    return jsonify(review)
+
+@app.route('/api/reviews/<int:review_id>/reopen', methods=['POST'])
+def reopen_review(review_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (review_id,)).fetchone()
+    if not review:
+        return jsonify({'error': '复核项不存在'}), 404
+    
+    operator_id = data.get('operator_id')
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'RECEIVER':
+        return jsonify({'error': '只有接收方才能撤销重开已关闭的复核项'}), 400
+    
+    if review['status'] != 'CLOSED':
+        return jsonify({'error': f'只有"已关闭"状态才能撤销重开，当前状态：{REVIEW_STATUS_NAME.get(review["status"])}'}), 400
+    
+    reason = data.get('reason', '').strip()
+    if not reason:
+        return jsonify({'error': '撤销重开原因不能为空'}), 400
+    
+    old_status_name = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    
+    db.execute('''UPDATE review_items 
+                 SET status = 'OPEN', closed_by = NULL, closed_at = NULL,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?''', (review_id,))
+    
+    box = db.execute('SELECT * FROM boxes WHERE id = ?', (review['box_id'],)).fetchone()
+    add_history(db, review['batch_id'], review['box_id'], '撤销重开复核项', operator_id, operator['role'],
+               box_no=box['box_no'] if box else None,
+               reason=f'复核项#{review_id} 状态更新: {old_status_name} → 待处理 | 撤销原因: {reason}')
+    
+    db.commit()
+    
+    review = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
+                          uc.username as closer_name
+                          FROM review_items r
+                          JOIN boxes bx ON r.box_id = bx.id
+                          JOIN users u ON r.created_by = u.id
+                          LEFT JOIN users uc ON r.closed_by = uc.id
+                          WHERE r.id = ?''', (review_id,)).fetchone()
+    review['status_name'] = REVIEW_STATUS_NAME.get(review['status'], review['status'])
+    return jsonify(review)
 
 if __name__ == '__main__':
     init_db()
