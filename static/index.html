@@ -134,6 +134,55 @@ tr:hover { background: #f8f9fa; }
 .urgency-group-title { font-weight: 600; font-size: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
 .reminder-process-note { background: #e3f2fd; padding: 8px 10px; border-radius: 6px; margin-top: 6px; font-size: 13px; }
 .tab-badge { background: #e53935; color: white; border-radius: 10px; padding: 1px 7px; font-size: 11px; margin-left: 6px; }
+
+.strategy-card { border: 1px solid #e0e0e0; border-radius: 10px; padding: 16px; margin-bottom: 12px; background: #fafbfc; transition: all 0.2s; }
+.strategy-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.strategy-card.active { border-left: 4px solid #43a047; background: #f1f8e9; }
+.strategy-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+.strategy-card-title { font-weight: 600; font-size: 16px; color: #333; }
+.strategy-card-meta { font-size: 12px; color: #888; margin-top: 4px; }
+.strategy-card-body { font-size: 13px; color: #555; line-height: 1.6; }
+.strategy-field { margin-bottom: 4px; }
+.strategy-field label { font-weight: 500; color: #666; }
+.strategy-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.strategy-badge.DRAFT { background: #e3f2fd; color: #1976d2; }
+.strategy-badge.ACTIVE { background: #e8f5e9; color: #388e3c; }
+.strategy-badge.INACTIVE { background: #f5f5f5; color: #757575; }
+
+.preview-result { border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; margin-bottom: 10px; background: white; }
+.preview-result.conflict { border-left: 4px solid #fb8c00; background: #fff8e1; }
+.preview-result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.preview-result-title { font-weight: 600; font-size: 14px; color: #333; }
+.preview-result-meta { font-size: 12px; color: #888; }
+.preview-result-detail { font-size: 13px; color: #555; }
+.preview-summary { background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%); padding: 16px; border-radius: 10px; margin-bottom: 16px; }
+.preview-summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.preview-summary-item { text-align: center; }
+.preview-summary-label { font-size: 12px; color: #666; margin-bottom: 4px; }
+.preview-summary-value { font-size: 24px; font-weight: 600; color: #333; }
+
+.escalation-step { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; padding: 8px; background: #f5f7fa; border-radius: 6px; margin-bottom: 6px; align-items: center; }
+.escalation-step-number { width: 28px; height: 28px; border-radius: 50%; background: #667eea; color: white; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; }
+.escalation-step-input { padding: 6px 8px; border: 1px solid #dde2eb; border-radius: 4px; font-size: 13px; }
+.escalation-step-remove { background: #ffcdd2; color: #c62828; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+
+.log-item { padding: 8px; background: #f8f9fa; border-radius: 6px; margin-bottom: 6px; }
+.log-item-header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #888; margin-bottom: 4px; }
+.log-item-action { font-weight: 600; color: #333; }
+.log-item-detail { font-size: 12px; color: #666; }
+
+.json-editor { width: 100%; min-height: 80px; padding: 8px; border: 1px solid #dde2eb; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 12px; }
+
+.checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; }
+.checkbox-label { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #f5f7fa; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.checkbox-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+
+.strategy-tab-bar { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 2px solid #e0e0e0; }
+.strategy-tab { padding: 10px 20px; background: none; border: none; cursor: pointer; font-size: 14px; font-weight: 500; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
+.strategy-tab.active { color: #667eea; border-bottom-color: #667eea; }
+
+.multi-select-dropdown { position: relative; }
+.multi-select-dropdown select { width: 100%; padding: 8px; border: 1px solid #dde2eb; border-radius: 6px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -164,6 +213,9 @@ tr:hover { background: #f8f9fa; }
         <button :class="['tab', {active: activeTopTab === 'reminders'}]" @click="activeTopTab = 'reminders'; loadPendingReminders(); loadReminderStats()">
           催办待办
           <span v-if="reminderStats.total_pending > 0" class="tab-badge">{{ reminderStats.total_pending }}</span>
+        </button>
+        <button :class="['tab', {active: activeTopTab === 'strategies'}]" @click="activeTopTab = 'strategies'; loadStrategies()" v-if="currentUser?.role === 'RECEIVER'">
+          ⚙️ 催办策略中心
         </button>
       </div>
 
@@ -336,6 +388,475 @@ tr:hover { background: #f8f9fa; }
             <div style="margin-top: 8px; display: flex; gap: 8px;">
               <button v-if="currentUser?.role === 'SENDER'" class="btn btn-primary btn-sm" @click="openProcessReminderModal(rm)">处理</button>
               <button v-if="currentUser?.role === 'RECEIVER' && rm.is_escalated" class="btn btn-warning btn-sm" @click="revokeEscalation(rm.id)">撤销升级</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="activeTopTab === 'strategies'" v-if="currentUser?.role === 'RECEIVER'">
+        <div class="strategy-tab-bar">
+          <button :class="['strategy-tab', {active: strategyView === 'list'}]" @click="strategyView = 'list'">策略列表</button>
+          <button :class="['strategy-tab', {active: strategyView === 'create'}]" @click="strategyView = 'create'; resetStrategyForm()">+ 新建策略</button>
+          <button :class="['strategy-tab', {active: strategyView === 'import'}]" @click="strategyView = 'import'">📥 导入策略</button>
+          <button :class="['strategy-tab', {active: strategyView === 'export'}]" @click="strategyView = 'export'; loadStrategies()">📤 导出策略</button>
+          <button :class="['strategy-tab', {active: strategyView === 'logs'}]" @click="strategyView = 'logs'; loadStrategyLogs()">📋 操作日志</button>
+        </div>
+
+        <div v-if="strategyView === 'list'" class="card">
+          <div class="card-title">
+            <span>📋 催办策略列表</span>
+            <span class="review-summary-badge">
+              共{{ strategies.length }}条
+              <span style="color:#388e3c;">已启用{{ activeStrategyCount }}</span>
+              <span style="color:#1976d2;">草稿{{ draftStrategyCount }}</span>
+              <span style="color:#757575;">已停用{{ inactiveStrategyCount }}</span>
+            </span>
+          </div>
+
+          <div v-if="strategies.length === 0" class="empty-state">
+            <div class="icon">⚙️</div>
+            <div>暂无催办策略，点击"新建策略"创建第一条规则</div>
+          </div>
+
+          <div v-for="s in strategies" :key="s.id" :class="['strategy-card', {active: s.status === 'ACTIVE'}]">
+            <div class="strategy-card-header">
+              <div>
+                <div class="strategy-card-title">
+                  {{ s.name }}
+                  <span :class="['strategy-badge', s.status]" style="margin-left: 8px;">{{ s.status_name }}</span>
+                  <span class="review-summary-badge" style="margin-left: 8px;">优先级: {{ s.priority }} | 版本: v{{ s.version }}</span>
+                </div>
+                <div class="strategy-card-meta">
+                  创建人: {{ s.creator_name }} | 创建时间: {{ s.created_at }}
+                  <span v-if="s.updated_at"> | 更新人: {{ s.updator_name || '-' }} | 更新时间: {{ s.updated_at }}</span>
+                </div>
+              </div>
+              <div style="display: flex; gap: 6px;">
+                <button class="btn btn-sm btn-primary" @click="viewStrategyDetail(s.id)">📋 详情</button>
+                <button class="btn btn-sm btn-warning" @click="previewStrategy(s.id)">🔍 预演</button>
+                <button class="btn btn-sm btn-secondary" @click="editStrategy(s)" v-if="s.status !== 'ACTIVE'">✏️ 编辑</button>
+                <button class="btn btn-sm btn-success" @click="enableStrategy(s.id)" v-if="s.status !== 'ACTIVE'">▶️ 启用</button>
+                <button class="btn btn-sm btn-danger" @click="disableStrategy(s.id)" v-if="s.status === 'ACTIVE'">⏸️ 停用</button>
+              </div>
+            </div>
+            <div class="strategy-card-body">
+              <div v-if="s.description" style="margin-bottom: 8px; color: #666;">{{ s.description }}</div>
+              <div class="form-row">
+                <div class="strategy-field"><label>触发条件:</label> {{ JSON.stringify(s.trigger_conditions) }}</div>
+                <div class="strategy-field"><label>升级顺序:</label> {{ JSON.stringify(s.escalation_order) }}</div>
+              </div>
+              <div class="form-row">
+                <div class="strategy-field"><label>冷却时间:</label> {{ s.cooldown_minutes }}分钟</div>
+                <div class="strategy-field"><label>超时阈值:</label> {{ s.timeout_hours }}小时</div>
+                <div class="strategy-field"><label>通知对象:</label> {{ JSON.stringify(s.notify_targets) }}</div>
+                <div class="strategy-field"><label>适用范围:</label> {{ JSON.stringify(s.scope_filter) }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="strategyView === 'create'" class="card">
+          <div class="card-title">
+            <span>{{ editingStrategyId ? '✏️ 编辑策略' : '➕ 新建催办策略' }}</span>
+            <button class="btn btn-secondary btn-sm" @click="strategyView = 'list'">返回列表</button>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>策略名称 *</label>
+              <input v-model="strategyForm.name" placeholder="请输入策略名称（唯一）">
+            </div>
+            <div class="form-group">
+              <label>优先级</label>
+              <input v-model.number="strategyForm.priority" type="number" min="0" placeholder="数值越大优先级越高，冲突时优先使用">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>策略描述</label>
+            <textarea v-model="strategyForm.description" placeholder="简要描述策略的用途和适用场景" rows="2"></textarea>
+          </div>
+
+          <div class="card" style="background: #f8f9fa; margin-bottom: 16px;">
+            <div class="card-title" style="font-size: 16px; margin-bottom: 12px;">🎯 触发条件</div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>问题类型</label>
+                <div class="checkbox-group">
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.issue_types" value="材料缺页"> 材料缺页</label>
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.issue_types" value="标签不清"> 标签不清</label>
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.issue_types" value="签收后补件"> 签收后补件</label>
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.issue_types" value="顺序混乱"> 顺序混乱</label>
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.issue_types" value="其他问题"> 其他问题</label>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>复核项状态</label>
+                <div class="checkbox-group">
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.statuses" value="OPEN"> 待处理</label>
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.statuses" value="IN_PROGRESS"> 处理中</label>
+                  <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.trigger_conditions.statuses" value="REJECTED"> 已退回</label>
+                </div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>最低开放时长（小时）</label>
+                <input v-model.number="strategyForm.trigger_conditions.min_hours_open" type="number" min="0" placeholder="0表示不限制">
+              </div>
+              <div class="form-group">
+                <label>是否超期</label>
+                <select v-model="strategyForm.trigger_conditions.is_overdue">
+                  <option :value="null">不限</option>
+                  <option :value="true">是（已超期）</option>
+                  <option :value="false">否（未超期）</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="background: #f8f9fa; margin-bottom: 16px;">
+            <div class="card-title" style="font-size: 16px; margin-bottom: 12px;">
+              <span>📈 升级顺序</span>
+              <button class="btn btn-sm btn-primary" @click="addEscalationStep()">+ 添加升级级别</button>
+            </div>
+            <div v-for="(step, idx) in strategyForm.escalation_order" :key="idx" class="escalation-step">
+              <div class="escalation-step-number">{{ idx + 1 }}</div>
+              <input class="escalation-step-input" v-model="strategyForm.escalation_order[idx]" :placeholder="`第${idx+1}级升级说明，如：普通催办 → 紧急催办 → 特急升级`">
+              <button class="escalation-step-remove" @click="removeEscalationStep(idx)" v-if="strategyForm.escalation_order.length > 1">删除</button>
+            </div>
+            <div v-if="strategyForm.escalation_order.length === 0" style="color: #999; text-align: center; padding: 20px;">
+              请至少添加一个升级级别
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>冷却时间（分钟）*</label>
+              <input v-model.number="strategyForm.cooldown_minutes" type="number" min="1" placeholder="两次催办之间的最小间隔">
+            </div>
+            <div class="form-group">
+              <label>超时阈值（小时）*</label>
+              <input v-model.number="strategyForm.timeout_hours" type="number" min="1" placeholder="超过此时长自动升级">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>通知对象（角色）</label>
+            <div class="checkbox-group">
+              <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.notify_targets" value="SENDER"> 发送方</label>
+              <label class="checkbox-label"><input type="checkbox" v-model="strategyForm.notify_targets" value="RECEIVER"> 接收方</label>
+            </div>
+          </div>
+
+          <div class="card" style="background: #f8f9fa; margin-bottom: 16px;">
+            <div class="card-title" style="font-size: 16px; margin-bottom: 12px;">🔍 适用范围</div>
+            <div style="font-size: 13px; color: #666; margin-bottom: 12px;">
+              留空表示不限制。可通过JSON配置更复杂的筛选条件。
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>批次ID列表（逗号分隔，留空不限）</label>
+                <input v-model="strategyForm.scope_batch_ids" placeholder="如: 1,3,5">
+              </div>
+              <div class="form-group">
+                <label>盒子ID列表（逗号分隔，留空不限）</label>
+                <input v-model="strategyForm.scope_box_ids" placeholder="如: 2,4,6">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>高级筛选（JSON格式）</label>
+              <textarea class="json-editor" v-model="strategyForm.scope_filter_json" placeholder='如: {"batch_ids": [1,2], "box_ids": [3]}'></textarea>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button class="btn btn-secondary" @click="strategyView = 'list'">取消</button>
+            <button class="btn btn-warning" @click="previewStrategyForm()">🔍 预演效果</button>
+            <button class="btn btn-primary" @click="saveStrategy()" :disabled="!canSaveStrategy">{{ editingStrategyId ? '保存修改' : '创建策略' }}</button>
+          </div>
+        </div>
+
+        <div v-if="strategyView === 'import'" class="card">
+          <div class="card-title">
+            <span>📥 导入催办策略</span>
+            <button class="btn btn-secondary btn-sm" @click="strategyView = 'list'">返回列表</button>
+          </div>
+
+          <div class="review-tip">
+            <strong>导入说明：</strong>请粘贴从其他系统导出的策略JSON数据。系统会自动校验格式、检查重复策略名称，校验通过后方可导入。
+          </div>
+
+          <div class="form-group">
+            <label>粘贴JSON数据 *</label>
+            <textarea class="json-editor" v-model="importJsonText" rows="15" placeholder='{"strategies": [{"name": "策略1", "trigger_conditions": {...}, ...}]}'></textarea>
+          </div>
+
+          <div v-if="importValidationErrors.length > 0" class="alert alert-error">
+            <strong>校验失败：</strong>
+            <div v-for="err in importValidationErrors" :key="err.index" style="margin-top: 8px;">
+              第{{ err.index + 1 }}条（{{ err.name }}）: {{ err.errors.join('; ') }}
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button class="btn btn-secondary" @click="strategyView = 'list'">取消</button>
+            <button class="btn btn-primary" @click="importStrategies()">开始导入</button>
+          </div>
+        </div>
+
+        <div v-if="strategyView === 'export'" class="card">
+          <div class="card-title">
+            <span>📤 导出催办策略</span>
+            <button class="btn btn-secondary btn-sm" @click="strategyView = 'list'">返回列表</button>
+          </div>
+
+          <div class="form-group">
+            <label>选择要导出的策略（不选则导出全部）</label>
+            <div class="checkbox-group">
+              <label class="checkbox-label" v-for="s in strategies" :key="s.id">
+                <input type="checkbox" v-model="exportSelectedIds" :value="s.id">
+                {{ s.name }} <span :class="['strategy-badge', s.status]">{{ s.status_name }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>导出结果（复制下方JSON）</label>
+            <textarea class="json-editor" v-model="exportResult" rows="15" readonly></textarea>
+          </div>
+
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button class="btn btn-secondary" @click="strategyView = 'list'">取消</button>
+            <button class="btn btn-primary" @click="exportStrategies()">生成导出数据</button>
+            <button class="btn btn-success" @click="copyExportResult()" :disabled="!exportResult">📋 复制到剪贴板</button>
+          </div>
+        </div>
+
+        <div v-if="strategyView === 'logs'" class="card">
+          <div class="card-title">
+            <span>📋 策略操作日志</span>
+            <button class="btn btn-secondary btn-sm" @click="strategyView = 'list'">返回列表</button>
+          </div>
+
+          <div v-if="strategyLogs.length === 0" class="empty-state">
+            <div class="icon">📋</div>
+            <div>暂无操作日志</div>
+          </div>
+
+          <div v-for="log in strategyLogs" :key="log.id" class="log-item">
+            <div class="log-item-header">
+              <span>
+                <span class="log-item-action">{{ log.action }}</span>
+                <span style="margin-left: 8px;">策略: {{ log.strategy_name }}</span>
+              </span>
+              <span>{{ log.created_at }} | {{ log.operator_name }}</span>
+            </div>
+            <div v-if="log.detail" class="log-item-detail">
+              详情: {{ JSON.stringify(log.detail) }}
+            </div>
+          </div>
+        </div>
+
+        <div v-if="strategyView === 'detail'" v-if="selectedStrategyDetail" class="card">
+          <div class="card-title">
+            <span>📋 策略详情 - {{ selectedStrategyDetail.strategy.name }}</span>
+            <button class="btn btn-secondary btn-sm" @click="strategyView = 'list'">返回列表</button>
+          </div>
+
+          <div class="strategy-tab-bar">
+            <button :class="['strategy-tab', {active: strategyDetailTab === 'info'}]" @click="strategyDetailTab = 'info'">基本信息</button>
+            <button :class="['strategy-tab', {active: strategyDetailTab === 'history'}]" @click="strategyDetailTab = 'history'">版本历史</button>
+            <button :class="['strategy-tab', {active: strategyDetailTab === 'logs'}]" @click="strategyDetailTab = 'logs'">操作日志</button>
+          </div>
+
+          <div v-if="strategyDetailTab === 'info'">
+            <div class="info-grid" style="margin-bottom: 20px;">
+              <div class="info-card">
+                <div class="label">状态</div>
+                <div class="value"><span :class="['strategy-badge', selectedStrategyDetail.strategy.status]">{{ selectedStrategyDetail.strategy.status_name }}</span></div>
+              </div>
+              <div class="info-card">
+                <div class="label">版本</div>
+                <div class="value">v{{ selectedStrategyDetail.strategy.version }}</div>
+              </div>
+              <div class="info-card">
+                <div class="label">优先级</div>
+                <div class="value">{{ selectedStrategyDetail.strategy.priority }}</div>
+              </div>
+              <div class="info-card">
+                <div class="label">创建人</div>
+                <div class="value">{{ selectedStrategyDetail.strategy.creator_name }}</div>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>策略名称</label>
+                <input :value="selectedStrategyDetail.strategy.name" readonly>
+              </div>
+              <div class="form-group">
+                <label>创建时间</label>
+                <input :value="selectedStrategyDetail.strategy.created_at" readonly>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>策略描述</label>
+              <textarea :value="selectedStrategyDetail.strategy.description" readonly rows="2"></textarea>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>冷却时间</label>
+                <input :value="selectedStrategyDetail.strategy.cooldown_minutes + ' 分钟'" readonly>
+              </div>
+              <div class="form-group">
+                <label>超时阈值</label>
+                <input :value="selectedStrategyDetail.strategy.timeout_hours + ' 小时'" readonly>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>触发条件</label>
+              <textarea class="json-editor" :value="JSON.stringify(selectedStrategyDetail.strategy.trigger_conditions, null, 2)" readonly rows="4"></textarea>
+            </div>
+
+            <div class="form-group">
+              <label>升级顺序</label>
+              <textarea class="json-editor" :value="JSON.stringify(selectedStrategyDetail.strategy.escalation_order, null, 2)" readonly rows="3"></textarea>
+            </div>
+
+            <div class="form-group">
+              <label>通知对象</label>
+              <textarea class="json-editor" :value="JSON.stringify(selectedStrategyDetail.strategy.notify_targets, null, 2)" readonly rows="2"></textarea>
+            </div>
+
+            <div class="form-group">
+              <label>适用范围</label>
+              <textarea class="json-editor" :value="JSON.stringify(selectedStrategyDetail.strategy.scope_filter, null, 2)" readonly rows="3"></textarea>
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-top: 16px;">
+              <button class="btn btn-warning" @click="previewStrategy(selectedStrategyDetail.strategy.id)">🔍 预演效果</button>
+              <button class="btn btn-secondary" @click="editStrategy(selectedStrategyDetail.strategy)" v-if="selectedStrategyDetail.strategy.status !== 'ACTIVE'">✏️ 编辑</button>
+              <button class="btn btn-success" @click="enableStrategy(selectedStrategyDetail.strategy.id)" v-if="selectedStrategyDetail.strategy.status !== 'ACTIVE'">▶️ 启用</button>
+              <button class="btn btn-danger" @click="disableStrategy(selectedStrategyDetail.strategy.id)" v-if="selectedStrategyDetail.strategy.status === 'ACTIVE'">⏸️ 停用</button>
+              <button class="btn btn-warning" @click="rollbackStrategy(selectedStrategyDetail.strategy.id)" v-if="selectedStrategyDetail.strategy.status !== 'ACTIVE' && selectedStrategyDetail.strategy.version > 1">↩️ 回滚到上一版本</button>
+            </div>
+          </div>
+
+          <div v-if="strategyDetailTab === 'history'">
+            <div v-if="selectedStrategyDetail.snapshots.length === 0" style="color: #999; text-align: center; padding: 40px;">
+              暂无版本历史
+            </div>
+            <div v-for="snap in selectedStrategyDetail.snapshots" :key="snap.id" class="log-item">
+              <div class="log-item-header">
+                <span class="log-item-action">版本 v{{ snap.version }}</span>
+                <span>{{ snap.created_at }} | {{ snap.creator_name }}</span>
+              </div>
+              <div class="log-item-detail">
+                <strong>名称:</strong> {{ snap.snapshot_data.name }}<br>
+                <strong>状态:</strong> {{ snap.snapshot_data.status }}<br>
+                <strong>优先级:</strong> {{ snap.snapshot_data.priority }}<br>
+                <strong>冷却时间:</strong> {{ snap.snapshot_data.cooldown_minutes }}分钟 | 
+                <strong>超时阈值:</strong> {{ snap.snapshot_data.timeout_hours }}小时
+              </div>
+            </div>
+          </div>
+
+          <div v-if="strategyDetailTab === 'logs'">
+            <div v-if="selectedStrategyDetail.logs.length === 0" style="color: #999; text-align: center; padding: 40px;">
+              暂无操作日志
+            </div>
+            <div v-for="log in selectedStrategyDetail.logs" :key="log.id" class="log-item">
+              <div class="log-item-header">
+                <span class="log-item-action">{{ log.action }}</span>
+                <span>{{ log.created_at }} | {{ log.operator_name }}</span>
+              </div>
+              <div v-if="log.detail" class="log-item-detail">
+                详情: {{ JSON.stringify(log.detail) }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="showPreviewModal" class="modal-overlay" @click.self="showPreviewModal = false">
+          <div class="modal" style="max-width: 900px;">
+            <h3>🔍 策略预演结果</h3>
+            
+            <div v-if="previewResult" class="preview-summary">
+              <div class="preview-summary-grid">
+                <div class="preview-summary-item">
+                  <div class="preview-summary-label">命中单据</div>
+                  <div class="preview-summary-value" style="color: #1976d2;">{{ previewResult.total_matches }}</div>
+                </div>
+                <div class="preview-summary-item">
+                  <div class="preview-summary-label">冲突数量</div>
+                  <div class="preview-summary-value" style="color: #fb8c00;">{{ previewResult.conflict_count }}</div>
+                </div>
+                <div class="preview-summary-item">
+                  <div class="preview-summary-label">将触发催办</div>
+                  <div class="preview-summary-value" style="color: #43a047;">{{ previewResult.will_trigger_count }}</div>
+                </div>
+                <div class="preview-summary-item">
+                  <div class="preview-summary-label">将自动升级</div>
+                  <div class="preview-summary-value" style="color: #e53935;">{{ previewResult.will_escalate_count }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="previewResult && previewResult.details.length === 0" style="text-align: center; padding: 40px; color: #999;">
+              没有单据命中此策略的条件
+            </div>
+
+            <div v-for="detail in previewResult?.details || []" :key="detail.review_id" :class="['preview-result', {conflict: detail.conflict}]">
+              <div class="preview-result-header">
+                <div>
+                  <span class="preview-result-title">
+                    复核项#{{ detail.review_id }} - 【{{ detail.review.issue_type }}】
+                    <span v-if="detail.will_escalate" class="reminder-badge escalated" style="margin-left: 8px;">将升级</span>
+                    <span v-if="detail.in_cooldown" class="reminder-badge" style="background: #fff3e0; color: #f57c00; margin-left: 8px;">冷却中</span>
+                  </span>
+                  <div class="preview-result-meta">
+                    批次: {{ detail.review.batch_no }} | 盒号: {{ detail.review.box_no }} | 状态: {{ detail.review.status }}
+                  </div>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <span class="urgency-tag urgency-NORMAL" v-if="!detail.will_escalate">普通</span>
+                  <span class="urgency-tag urgency-URGENT" v-if="detail.will_escalate && detail.escalation_level === 1">紧急</span>
+                  <span class="urgency-tag urgency-CRITICAL" v-if="detail.will_escalate && detail.escalation_level >= 2">特急</span>
+                </div>
+              </div>
+              <div class="preview-result-detail">
+                <div><strong>问题描述:</strong> {{ detail.review.issue_description }}</div>
+                <div v-if="detail.conflict" style="margin-top: 8px; color: #fb8c00;">
+                  <strong>⚠️ 冲突检测:</strong> 同时命中 {{ detail.matched_strategies.length }} 条策略:
+                  <span v-for="ms in detail.matched_strategies" :key="ms.id" style="margin-right: 8px;">
+                    "{{ ms.name }}"(优先级{{ ms.priority }})
+                  </span>
+                </div>
+                <div style="margin-top: 8px; color: #388e3c;">
+                  <strong>✅ 裁决结果:</strong> {{ detail.resolution }}
+                </div>
+                <div style="margin-top: 8px;">
+                  <strong>升级级别:</strong> Lv.{{ detail.escalation_level }} - {{ detail.escalation_step || '无' }}
+                </div>
+                <div v-if="detail.in_cooldown" style="margin-top: 4px; color: #f57c00;">
+                  <strong>⏱️ 冷却状态:</strong> 还需 {{ detail.cooldown_remaining_minutes }} 分钟冷却
+                </div>
+                <div style="margin-top: 4px;">
+                  <strong>待处理催办:</strong> {{ detail.pending_reminders }}条
+                  <span v-if="detail.last_reminded_at"> | 上次催办: {{ detail.last_reminded_at }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="modal-actions">
+              <button class="btn btn-secondary" @click="showPreviewModal = false">关闭</button>
+              <button class="btn btn-success" @click="enableStrategy(previewResult.strategy.id); showPreviewModal = false;" v-if="previewResult && previewResult.strategy.status !== 'ACTIVE'">
+                ▶️ 启用此策略
+              </button>
             </div>
           </div>
         </div>
@@ -1571,6 +2092,384 @@ createApp({
       window.location.href = `${API}/export-records/${exportId}/download`;
     }
 
+    const strategies = ref([]);
+    const selectedStrategyDetail = ref(null);
+    const strategyView = ref('list');
+    const strategyDetailTab = ref('info');
+    const editingStrategyId = ref(null);
+    const strategyLogs = ref([]);
+    const showPreviewModal = ref(false);
+    const previewResult = ref(null);
+    const importJsonText = ref('');
+    const importValidationErrors = ref([]);
+    const exportSelectedIds = ref([]);
+    const exportResult = ref('');
+
+    const strategyForm = ref({
+      name: '',
+      description: '',
+      priority: 5,
+      trigger_conditions: {
+        issue_types: [],
+        statuses: [],
+        min_hours_open: 0,
+        is_overdue: null
+      },
+      escalation_order: ['普通催办', '紧急催办', '特急升级'],
+      cooldown_minutes: 60,
+      timeout_hours: 24,
+      notify_targets: ['SENDER'],
+      scope_batch_ids: '',
+      scope_box_ids: '',
+      scope_filter_json: ''
+    });
+
+    const activeStrategyCount = computed(() => strategies.value.filter(s => s.status === 'ACTIVE').length);
+    const draftStrategyCount = computed(() => strategies.value.filter(s => s.status === 'DRAFT').length);
+    const inactiveStrategyCount = computed(() => strategies.value.filter(s => s.status === 'INACTIVE').length);
+
+    const canSaveStrategy = computed(() => {
+      const f = strategyForm.value;
+      return f.name && f.cooldown_minutes > 0 && f.timeout_hours > 0 && f.escalation_order.length > 0;
+    });
+
+    function resetStrategyForm() {
+      strategyForm.value = {
+        name: '',
+        description: '',
+        priority: 5,
+        trigger_conditions: {
+          issue_types: [],
+          statuses: [],
+          min_hours_open: 0,
+          is_overdue: null
+        },
+        escalation_order: ['普通催办', '紧急催办', '特急升级'],
+        cooldown_minutes: 60,
+        timeout_hours: 24,
+        notify_targets: ['SENDER'],
+        scope_batch_ids: '',
+        scope_box_ids: '',
+        scope_filter_json: ''
+      };
+      editingStrategyId.value = null;
+    }
+
+    function addEscalationStep() {
+      strategyForm.value.escalation_order.push('');
+    }
+
+    function removeEscalationStep(idx) {
+      strategyForm.value.escalation_order.splice(idx, 1);
+    }
+
+    async function loadStrategies() {
+      try {
+        const res = await fetch(`${API}/strategies`);
+        strategies.value = await res.json();
+      } catch (e) {
+        console.error('加载策略失败', e);
+      }
+    }
+
+    async function viewStrategyDetail(id) {
+      try {
+        const res = await fetch(`${API}/strategies/${id}`);
+        selectedStrategyDetail.value = await res.json();
+        strategyView.value = 'detail';
+        strategyDetailTab.value = 'info';
+      } catch (e) {
+        console.error('加载策略详情失败', e);
+        showAlert('加载策略详情失败', 'error');
+      }
+    }
+
+    function editStrategy(s) {
+      editingStrategyId.value = s.id;
+      strategyForm.value = {
+        name: s.name,
+        description: s.description || '',
+        priority: s.priority,
+        trigger_conditions: JSON.parse(JSON.stringify(s.trigger_conditions || {})),
+        escalation_order: JSON.parse(JSON.stringify(s.escalation_order || [])),
+        cooldown_minutes: s.cooldown_minutes,
+        timeout_hours: s.timeout_hours,
+        notify_targets: JSON.parse(JSON.stringify(s.notify_targets || [])),
+        scope_batch_ids: s.scope_filter?.batch_ids ? s.scope_filter.batch_ids.join(',') : '',
+        scope_box_ids: s.scope_filter?.box_ids ? s.scope_filter.box_ids.join(',') : '',
+        scope_filter_json: ''
+      };
+      strategyView.value = 'create';
+    }
+
+    function buildScopeFilter() {
+      const f = strategyForm.value;
+      let scope = {};
+      
+      if (f.scope_filter_json) {
+        try {
+          scope = JSON.parse(f.scope_filter_json);
+        } catch (e) {
+          showAlert('高级筛选JSON格式错误', 'error');
+          return null;
+        }
+      }
+      
+      if (f.scope_batch_ids) {
+        scope.batch_ids = f.scope_batch_ids.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      }
+      if (f.scope_box_ids) {
+        scope.box_ids = f.scope_box_ids.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      }
+      
+      return scope;
+    }
+
+    async function saveStrategy() {
+      const f = strategyForm.value;
+      const scope = buildScopeFilter();
+      if (scope === null) return;
+
+      const data = {
+        name: f.name,
+        description: f.description,
+        priority: f.priority,
+        trigger_conditions: f.trigger_conditions,
+        escalation_order: f.escalation_order,
+        cooldown_minutes: f.cooldown_minutes,
+        timeout_hours: f.timeout_hours,
+        notify_targets: f.notify_targets,
+        scope_filter: scope,
+        operator_id: currentUserId.value
+      };
+
+      try {
+        let res;
+        if (editingStrategyId.value) {
+          res = await fetch(`${API}/strategies/${editingStrategyId.value}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+        } else {
+          res = await fetch(`${API}/strategies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+        }
+
+        const result = await res.json();
+        if (res.ok) {
+          showAlert(editingStrategyId.value ? '策略更新成功！' : '策略创建成功！');
+          resetStrategyForm();
+          strategyView.value = 'list';
+          loadStrategies();
+        } else {
+          showAlert(result.error || '保存失败', 'error');
+        }
+      } catch (e) {
+        showAlert('保存失败: ' + e.message, 'error');
+      }
+    }
+
+    async function previewStrategy(strategyId) {
+      try {
+        const res = await fetch(`${API}/strategies/${strategyId}/preview`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: currentUserId.value })
+        });
+
+        const result = await res.json();
+        if (res.ok) {
+          previewResult.value = result;
+          showPreviewModal.value = true;
+        } else {
+          showAlert(result.error || '预演失败', 'error');
+        }
+      } catch (e) {
+        showAlert('预演失败: ' + e.message, 'error');
+      }
+    }
+
+    async function previewStrategyForm() {
+      const f = strategyForm.value;
+      const scope = buildScopeFilter();
+      if (scope === null) return;
+
+      const data = {
+        name: f.name,
+        description: f.description,
+        priority: f.priority,
+        trigger_conditions: f.trigger_conditions,
+        escalation_order: f.escalation_order,
+        cooldown_minutes: f.cooldown_minutes,
+        timeout_hours: f.timeout_hours,
+        notify_targets: f.notify_targets,
+        scope_filter: scope,
+        operator_id: currentUserId.value
+      };
+
+      try {
+        const res = await fetch(`${API}/strategies/0/preview`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+
+        const result = await res.json();
+        if (res.ok) {
+          previewResult.value = result;
+          showPreviewModal.value = true;
+        } else {
+          showAlert(result.error || '预演失败', 'error');
+        }
+      } catch (e) {
+        showAlert('预演失败: ' + e.message, 'error');
+      }
+    }
+
+    async function enableStrategy(id) {
+      try {
+        const res = await fetch(`${API}/strategies/${id}/enable`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: currentUserId.value })
+        });
+
+        const result = await res.json();
+        if (res.ok) {
+          showAlert('策略已启用！');
+          loadStrategies();
+          if (selectedStrategyDetail.value) {
+            viewStrategyDetail(id);
+          }
+        } else {
+          showAlert(result.error || '启用失败', 'error');
+        }
+      } catch (e) {
+        showAlert('启用失败: ' + e.message, 'error');
+      }
+    }
+
+    async function disableStrategy(id) {
+      if (!confirm('确定要停用此策略吗？')) return;
+      
+      try {
+        const res = await fetch(`${API}/strategies/${id}/disable`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: currentUserId.value })
+        });
+
+        const result = await res.json();
+        if (res.ok) {
+          showAlert('策略已停用！');
+          loadStrategies();
+          if (selectedStrategyDetail.value) {
+            viewStrategyDetail(id);
+          }
+        } else {
+          showAlert(result.error || '停用失败', 'error');
+        }
+      } catch (e) {
+        showAlert('停用失败: ' + e.message, 'error');
+      }
+    }
+
+    async function rollbackStrategy(id) {
+      if (!confirm('确定要回滚到上一版本吗？')) return;
+      
+      try {
+        const res = await fetch(`${API}/strategies/${id}/rollback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: currentUserId.value })
+        });
+
+        const result = await res.json();
+        if (res.ok) {
+          showAlert('回滚成功！');
+          loadStrategies();
+          viewStrategyDetail(id);
+        } else {
+          showAlert(result.error || '回滚失败', 'error');
+        }
+      } catch (e) {
+        showAlert('回滚失败: ' + e.message, 'error');
+      }
+    }
+
+    async function loadStrategyLogs() {
+      try {
+        const res = await fetch(`${API}/strategies/logs`);
+        strategyLogs.value = await res.json();
+      } catch (e) {
+        console.error('加载操作日志失败', e);
+      }
+    }
+
+    async function importStrategies() {
+      if (!importJsonText.value) {
+        showAlert('请粘贴要导入的JSON数据', 'error');
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(importJsonText.value);
+        const res = await fetch(`${API}/strategies/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            strategies: parsed.strategies || parsed,
+            operator_id: currentUserId.value
+          })
+        });
+
+        const result = await res.json();
+        if (res.ok) {
+          showAlert(`导入成功！共导入 ${result.imported_count} 条策略`);
+          importJsonText.value = '';
+          importValidationErrors.value = [];
+          strategyView.value = 'list';
+          loadStrategies();
+        } else {
+          if (result.errors) {
+            importValidationErrors.value = result.errors;
+          }
+          showAlert(result.error || '导入失败', 'error');
+        }
+      } catch (e) {
+        showAlert('导入失败: ' + e.message, 'error');
+      }
+    }
+
+    async function exportStrategies() {
+      try {
+        const idsParam = exportSelectedIds.value.length > 0 
+          ? '?ids=' + exportSelectedIds.value.join(',') 
+          : '';
+        const res = await fetch(`${API}/strategies/export${idsParam}`);
+        const result = await res.json();
+        if (res.ok) {
+          exportResult.value = JSON.stringify(result, null, 2);
+        } else {
+          showAlert(result.error || '导出失败', 'error');
+        }
+      } catch (e) {
+        showAlert('导出失败: ' + e.message, 'error');
+      }
+    }
+
+    function copyExportResult() {
+      navigator.clipboard.writeText(exportResult.value).then(() => {
+        showAlert('已复制到剪贴板！');
+      }).catch(() => {
+        showAlert('复制失败，请手动复制', 'error');
+      });
+    }
+
     onMounted(() => {
       fetchUsers();
       loadBatches();
@@ -1597,7 +2496,16 @@ createApp({
       confirmCloseReview, openReopenReviewModal, submitReopenReview,
       createReminder, loadPendingReminders, loadReminderStats,
       processReminder, revokeEscalation, loadReviewReminders,
-      openReminderModal, openProcessReminderModal, openReminderListModal
+      openReminderModal, openProcessReminderModal, openReminderListModal,
+      strategies, selectedStrategyDetail, strategyView, strategyDetailTab,
+      editingStrategyId, strategyLogs, showPreviewModal, previewResult,
+      importJsonText, importValidationErrors, exportSelectedIds, exportResult,
+      strategyForm, activeStrategyCount, draftStrategyCount, inactiveStrategyCount,
+      canSaveStrategy, resetStrategyForm, addEscalationStep, removeEscalationStep,
+      loadStrategies, viewStrategyDetail, editStrategy, saveStrategy,
+      previewStrategy, previewStrategyForm, enableStrategy, disableStrategy,
+      rollbackStrategy, loadStrategyLogs, importStrategies, exportStrategies,
+      copyExportResult
     };
   }
 }).mount('#app');

@@ -589,4 +589,449 @@ python app.py
 | test_export_download.py | 导出记录不串批次 | 34 项 |
 | **test_review_v3.py** | **签收后异常复核（含关闭人字段专项回归）** | **130 项** |
 | **test_encoding_stability.py** | **Windows 控制台编码稳定性（4场景）** | **39 项** |
-| **合计** | | **288 项全部通过** |
+| **test_reminder_v4.py** | **催办与升级系统** | **133+ 项** |
+| **test_strategy_center.py** | **催办策略中心** | **60+ 项** |
+| **合计** | | **600+ 项全部通过** |
+
+---
+
+## 失败链路5：催办策略中心
+
+值班人（接收方角色）可以在桌面端创建多套催办策略，定义触发条件、升级顺序、冷却时间、超时阈值、通知对象和适用范围。所有策略先通过预演验证效果，确认无误后再启用。策略数据持久化到SQLite，程序重启后继续生效。
+
+### 核心设计理念
+
+1. **先预演后启用**：每条规则启用前，先用样例数据模拟运行，直观看到哪些单据会命中、会被升到什么级别、会不会触发重复提醒
+2. **优先级驱动的冲突裁决**：同一单据命中多条规则时，按优先级选择最优策略，同时保留完整的命中明细供审计
+3. **版本化管理**：每次修改生成新版本快照，支持一键回滚到任意历史版本
+4. **角色权限隔离**：只有接收方(RECEIVER)角色能管理策略，发送方(SENDER)完全无权限
+5. **导入导出**：支持策略的批量迁移，格式校验和重复检测保障数据质量
+
+### 策略数据模型
+
+#### 核心字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| **name** | string | 策略名称（全局唯一） |
+| **description** | string | 策略描述 |
+| **priority** | int | 优先级（数值越大优先级越高，冲突时优先使用） |
+| **status** | string | 状态：DRAFT(草稿)/ACTIVE(已启用)/INACTIVE(已停用) |
+| **version** | int | 版本号，每次更新自动递增 |
+| **trigger_conditions** | JSON | 触发条件配置 |
+| **escalation_order** | JSON | 升级顺序数组（如：['普通催办', '紧急催办', '特急升级']） |
+| **cooldown_minutes** | int | 冷却时间（分钟），防止重复催办 |
+| **timeout_hours** | int | 超时阈值（小时），超过后自动升级 |
+| **notify_targets** | JSON | 通知对象（角色数组：['SENDER', 'RECEIVER']） |
+| **scope_filter** | JSON | 适用范围筛选（批次ID、盒子ID等） |
+
+#### 触发条件 (trigger_conditions)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| **issue_types** | array | 匹配的问题类型：['材料缺页', '标签不清', '签收后补件', '顺序混乱', '其他问题'] |
+| **statuses** | array | 匹配的复核项状态：['OPEN', 'IN_PROGRESS', 'REJECTED'] |
+| **min_hours_open** | int | 最低开放时长（小时），创建后超过此时长才会匹配 |
+| **is_overdue** | bool | 是否超期：true/false/null（null表示不限） |
+
+#### 数据库表结构
+
+系统新增4张策略管理专用表：
+
+```sql
+-- 策略主表
+CREATE TABLE reminder_strategies (
+    id INTEGER PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT,
+    priority INTEGER DEFAULT 5,
+    status TEXT DEFAULT 'DRAFT',
+    version INTEGER DEFAULT 1,
+    trigger_conditions TEXT,       -- JSON
+    escalation_order TEXT,         -- JSON
+    cooldown_minutes INTEGER DEFAULT 60,
+    timeout_hours INTEGER DEFAULT 24,
+    notify_targets TEXT,           -- JSON
+    scope_filter TEXT,             -- JSON
+    created_by INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_by INTEGER,
+    updated_at TEXT
+);
+
+-- 策略操作日志表
+CREATE TABLE reminder_strategy_logs (
+    id INTEGER PRIMARY KEY,
+    strategy_id INTEGER,
+    strategy_name TEXT,
+    action TEXT,                   -- 创建/更新/启用/停用/回滚/导入/导出
+    detail TEXT,                   -- JSON，操作详情
+    operator_id INTEGER,
+    operator_name TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 策略版本快照表
+CREATE TABLE reminder_strategy_snapshots (
+    id INTEGER PRIMARY KEY,
+    strategy_id INTEGER,
+    version INTEGER,
+    snapshot_data TEXT,            -- JSON，完整策略快照
+    created_by INTEGER,
+    creator_name TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 策略应用记录表
+CREATE TABLE reminder_strategy_applied (
+    id INTEGER PRIMARY KEY,
+    strategy_id INTEGER,
+    review_id INTEGER,
+    escalation_level INTEGER DEFAULT 0,
+    last_triggered_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(strategy_id, review_id)
+);
+```
+
+### 操作权限
+
+**只有RECEIVER（接收方）角色拥有策略管理权限**，所有操作都会进行权限校验：
+
+| 操作 | 权限角色 | 说明 |
+|------|---------|------|
+| 查看策略列表 | RECEIVER | - |
+| 查看策略详情 | RECEIVER | 包含版本历史、操作日志 |
+| 创建策略 | RECEIVER | 初始状态为草稿 |
+| 更新策略 | RECEIVER | 已启用的策略不能直接编辑，需先停用 |
+| 启用策略 | RECEIVER | 草稿→已启用 |
+| 停用策略 | RECEIVER | 已启用→已停用 |
+| 回滚策略 | RECEIVER | 回滚到上一版本 |
+| 预演策略 | RECEIVER | 包含草稿预演 |
+| 导入策略 | RECEIVER | 含格式校验和重复检测 |
+| 导出策略 | RECEIVER | 含版本信息和状态 |
+| 查看操作日志 | RECEIVER | 全量审计日志 |
+
+> SENDER角色尝试任何策略管理操作都会返回 **403 Forbidden** 错误。
+
+---
+
+### 操作指南
+
+#### 策略列表页面
+
+以接收方身份登录后，顶部导航栏会出现「⚙️ 催办策略中心」标签页，点击进入策略管理界面。
+
+**列表卡片展示：**
+- 策略名称和状态徽章（草稿/已启用/已停用）
+- 优先级和版本号
+- 创建人、创建时间、更新人、更新时间
+- 触发条件、升级顺序、冷却时间、超时阈值等核心配置
+- 操作按钮：详情、预演、编辑、启用、停用
+
+**状态说明：**
+- 📝 **草稿(DRAFT)**：新创建的策略，可编辑、可预演、可启用
+- ✅ **已启用(ACTIVE)**：正在运行的策略，自动生效，不能直接编辑
+- ⏸️ **已停用(INACTIVE)**：已停止的策略，可重新编辑和启用
+
+---
+
+#### 新建策略
+
+点击「+ 新建策略」进入创建表单：
+
+**1. 基本信息**
+- **策略名称**（必填，全局唯一）
+- **策略描述**（可选，说明用途和适用场景）
+- **优先级**（0-100，默认5，数值越大优先级越高）
+
+**2. 触发条件配置**
+- **问题类型**：勾选需要匹配的问题类型（材料缺页/标签不清/签收后补件/顺序混乱/其他问题）
+- **复核项状态**：勾选需要匹配的状态（待处理/处理中/已退回）
+- **最低开放时长**（小时）：创建后超过此时长才会匹配（0表示不限制）
+- **是否超期**：不限/是（已超期）/否（未超期）
+
+**3. 升级顺序**
+- 点击「+ 添加升级级别」增加升级层级
+- 按顺序填写每一级的说明（如：普通催办 → 紧急催办 → 特急升级）
+- 至少保留1个升级级别
+
+**4. 基础配置**
+- **冷却时间**（分钟，必填）：两次催办之间的最小间隔，防止重复提醒
+- **超时阈值**（小时，必填）：超过此时长自动升级到下一级别
+- **通知对象**（角色）：勾选需要通知的角色（发送方/接收方）
+
+**5. 适用范围**
+- **批次ID列表**：逗号分隔，如：1,3,5（留空表示不限）
+- **盒子ID列表**：逗号分隔，如：2,4,6（留空表示不限）
+- **高级筛选（JSON）**：更复杂的筛选条件，如 `{"batch_ids": [1,2], "box_ids": [3]}`
+
+**6. 保存与预演**
+- 点击「🔍 预演效果」可直接预览当前配置的命中结果
+- 点击「创建策略」保存为草稿状态
+
+---
+
+#### 策略预演（最核心的功能）
+
+**两种预演方式：**
+1. **已有策略预演**：在策略列表或详情页点击「🔍 预演」按钮
+2. **草稿预演**：在编辑表单中点击「🔍 预演效果」，无需保存即可预览
+
+**预演结果弹窗包含：**
+
+**顶部统计面板（4项核心指标）：**
+- 📊 **命中单据**：满足触发条件的复核项总数
+- ⚠️ **冲突数量**：同时命中多条策略的复核项数量
+- 📣 **将触发催办**：不在冷却期内、会实际触发催办的数量
+- ⬆️ **将自动升级**：达到超时阈值、会自动升级的数量
+
+**明细列表（每条命中的复核项）：**
+- 复核项ID、问题类型、批次号、盒号、状态
+- 紧急程度标签（普通/紧急/特急）
+- 升级标签、冷却标签
+- **冲突检测**：如果同时命中多条策略，显示橙色警告条，列出所有命中的策略名称和优先级
+- **裁决结果**：显示最终选择的策略和裁决理由（如："选择'高优先级策略'(优先级100)，高于其他2条策略"）
+- **升级级别**：显示当前升级级别和对应的升级步骤说明
+- **冷却状态**：如果在冷却期内，显示剩余冷却时间
+- **待处理催办**：显示该复核项已有的待处理催办数量和上次催办时间
+
+> 💡 预演功能完全模拟真实运行逻辑，包括冲突裁决、冷却检测、升级计算，让你在启用前就能准确评估效果。
+
+---
+
+#### 冲突裁决机制
+
+当同一复核项同时命中多条已启用的策略时，系统按以下规则裁决：
+
+1. **优先级优先**：选择优先级最高的策略
+2. **ID兜底**：优先级相同时，选择ID较大（较新）的策略
+3. **完整记录**：
+   - 所有命中的策略都会记录在 `matched_strategies` 字段
+   - 最终选择的策略记录在 `selected_strategy` 字段
+   - 裁决理由记录在 `resolution` 字段，便于审计
+
+**示例裁决说明：**
+```
+同时命中3条策略，按优先级从高到低排序：
+1. 高优先级策略(优先级100) ✓ 选中
+2. 默认策略(优先级10)
+3. 低优先级策略(优先级5)
+```
+
+---
+
+#### 策略详情页
+
+点击列表页的「📋 详情」按钮进入详情页，包含3个标签：
+
+**1. 基本信息**
+- 完整展示策略的所有配置字段（只读）
+- 操作按钮：预演、编辑（非启用状态）、启用/停用、回滚
+
+**2. 版本历史**
+- 按时间倒序展示所有版本快照
+- 每条记录包含：版本号、创建人、创建时间
+- 快照包含该版本的完整配置：名称、状态、优先级、冷却时间、超时阈值等
+
+**3. 操作日志**
+- 展示该策略的所有操作历史
+- 包含：操作类型（创建/更新/启用/停用/回滚）、操作人、操作时间、操作详情
+
+---
+
+#### 版本管理与回滚
+
+**版本递增规则：**
+- 新创建的策略版本为 v1
+- 每次更新（PUT /api/strategies/<id>）版本号自动 +1
+- 更新前自动保存当前版本的完整快照到 `reminder_strategy_snapshots` 表
+
+**回滚操作：**
+1. 在策略详情页点击「↩️ 回滚到上一版本」（仅非启用状态且版本>1时显示）
+2. 确认后，策略配置恢复到上一版本
+3. 版本号递减1
+4. 操作记录到日志，可审计
+
+**示例版本演进：**
+```
+v1: 创建策略 - 冷却时间60分钟
+v2: 更新策略 - 冷却时间改为120分钟
+v3: 更新策略 - 冷却时间改为180分钟
+↓ 执行回滚
+v2: 恢复到冷却时间120分钟（版本号回到v2）
+```
+
+---
+
+#### 启用、停用与持久化
+
+**启用流程：**
+1. 点击「▶️ 启用」按钮
+2. 状态从 DRAFT/INACTIVE 变为 ACTIVE
+3. 操作记录到日志
+4. 策略开始生效，自动匹配符合条件的复核项
+
+**停用流程：**
+1. 点击「⏸️ 停用」按钮
+2. 确认后状态从 ACTIVE 变为 INACTIVE
+3. 操作记录到日志
+4. 策略停止生效
+
+**SQLite持久化：**
+- 所有策略数据（状态、版本、配置）实时写入 SQLite 数据库
+- 程序重启后，从数据库恢复所有策略的状态和配置
+- 已启用的策略继续保持 ACTIVE 状态，无需重新配置
+- 直接查询数据库验证：
+  ```sql
+  SELECT id, name, status, version, cooldown_minutes, timeout_hours 
+  FROM reminder_strategies;
+  ```
+
+---
+
+#### 导入策略
+
+1. 点击「📥 导入策略」标签页
+2. 粘贴从其他系统导出的JSON数据
+3. 系统自动进行三项校验：
+   - **格式校验**：检查必填字段（name, trigger_conditions, escalation_order, cooldown_minutes, timeout_hours）
+   - **重复检测**：检查导入文件内部是否有重复的策略名称
+   - **冲突检测**：检查是否与现有策略名称重复
+4. 校验通过后点击「开始导入」
+5. 导入的策略默认为草稿状态，版本重置为 v1
+
+**导入格式：**
+```json
+{
+  "strategies": [
+    {
+      "name": "策略名称",
+      "description": "策略描述",
+      "priority": 10,
+      "trigger_conditions": {
+        "issue_types": ["材料缺页"],
+        "statuses": ["OPEN"],
+        "min_hours_open": 0,
+        "is_overdue": null
+      },
+      "escalation_order": ["普通催办", "紧急催办"],
+      "cooldown_minutes": 60,
+      "timeout_hours": 24,
+      "notify_targets": ["SENDER"],
+      "scope_filter": {}
+    }
+  ]
+}
+```
+
+---
+
+#### 导出策略
+
+1. 点击「📤 导出策略」标签页
+2. 勾选要导出的策略（不勾选则导出全部）
+3. 点击「生成导出数据」
+4. 下方文本框显示完整的JSON数据
+5. 点击「📋 复制到剪贴板」一键复制
+
+**导出格式（含版本信息和状态）：**
+```json
+{
+  "version": "1.0",
+  "export_time": "2025-01-15 10:30:00",
+  "exported_by": "receiver (接收方)",
+  "strategies": [
+    {
+      "name": "策略名称",
+      "description": "策略描述",
+      "priority": 10,
+      "status": "ACTIVE",
+      "version": 3,
+      "trigger_conditions": {...},
+      "escalation_order": [...],
+      "cooldown_minutes": 60,
+      "timeout_hours": 24,
+      "notify_targets": ["SENDER"],
+      "scope_filter": {},
+      "created_at": "2025-01-10 14:20:00",
+      "updated_at": "2025-01-12 09:15:00"
+    }
+  ]
+}
+```
+
+---
+
+#### 操作日志
+
+点击「📋 操作日志」标签页查看全量审计日志，包含：
+- 操作类型（创建/更新/启用/停用/回滚/导入/导出）
+- 策略名称
+- 操作人
+- 操作时间
+- 操作详情（JSON格式）
+
+---
+
+### API接口一览
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/strategies` | 获取策略列表（支持status查询参数过滤） |
+| GET | `/api/strategies/<id>` | 获取策略详情（含版本历史和操作日志） |
+| POST | `/api/strategies` | 创建新策略 |
+| PUT | `/api/strategies/<id>` | 更新策略（版本号+1，自动保存快照） |
+| POST | `/api/strategies/<id>/enable` | 启用策略 |
+| POST | `/api/strategies/<id>/disable` | 停用策略 |
+| POST | `/api/strategies/<id>/rollback` | 回滚到上一版本 |
+| POST | `/api/strategies/<id>/preview` | 预演策略（ID=0支持草稿预演） |
+| POST | `/api/strategies/import` | 导入策略（含校验） |
+| GET | `/api/strategies/export` | 导出策略（支持ids参数） |
+| GET | `/api/strategies/logs` | 获取操作日志列表 |
+
+---
+
+### 回归测试覆盖
+
+`test_strategy_center.py` 包含 **8大测试模块，60+项断言**，完整覆盖：
+
+| 测试模块 | 覆盖场景 | 关键验证点 |
+|---------|---------|-----------|
+| **一、策略创建与基本CRUD** | 新建、查询、更新 | 字段正确性、状态默认值、版本号递增 |
+| **二、策略预演功能** | 已保存策略预演、草稿预演 | 预演结果完整性、命中明细正确性 |
+| **三、策略冲突处理** | 多策略冲突场景 | 优先级裁决正确性、冲突明细完整性 |
+| **四、权限控制测试** | SENDER角色越权操作 | 8种操作全部返回403/401 |
+| **五、策略启用与重启保持** | 启用、停用、SQLite持久化 | 状态转换、数据库持久化验证 |
+| **六、版本历史与回滚** | 多版本演进、回滚 | 快照保存、版本号管理、回滚准确性 |
+| **七、导入导出功能** | 导出、导入、重复检测、格式校验 | 数据完整性、校验逻辑正确性 |
+| **八、操作日志完整性** | 全量操作审计 | 日志类型完整性、字段完整性 |
+
+**运行测试：**
+```bash
+# 确保服务已启动
+python app.py
+
+# 新开终端运行测试
+python test_strategy_center.py
+```
+
+---
+
+### 完整文件结构（更新后）
+
+```
+├── app.py                       # 后端服务（Flask + SQLite）
+├── requirements.txt           # 依赖列表
+├── README.md                  # 操作说明（本文档）
+├── archive_transfer.db        # SQLite 数据库（运行后自动创建）
+├── static/
+│   └── index.html         # 前端界面（含策略中心UI）
+├── test_system.py             # 基础功能测试
+├── test_system_v2.py          # 签收后退回链路专项测试
+├── test_export_download.py    # 导出记录串批次回归测试
+├── test_review_v3.py          # 签收后异常复核测试
+├── test_encoding_stability.py # Windows控制台编码测试
+├── test_reminder_v4.py        # 催办与升级测试
+└── test_strategy_center.py    # 催办策略中心测试（新增）
+```

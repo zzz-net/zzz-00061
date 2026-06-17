@@ -66,6 +66,30 @@ REMINDER_STATUS = {
     'CANCELLED': '已取消'
 }
 
+STRATEGY_STATUS = {
+    'DRAFT': '草稿',
+    'ACTIVE': '已启用',
+    'INACTIVE': '已停用'
+}
+
+STRATEGY_STATUS_NAME = {
+    'DRAFT': '草稿',
+    'ACTIVE': '已启用',
+    'INACTIVE': '已停用'
+}
+
+STRATEGY_ACTION = {
+    'CREATE': '创建策略',
+    'UPDATE': '更新策略',
+    'ENABLE': '启用策略',
+    'DISABLE': '停用策略',
+    'ROLLBACK': '回滚策略',
+    'IMPORT': '导入策略',
+    'EXPORT': '导出策略'
+}
+
+STRATEGY_PERMISSION_ROLES = ['RECEIVER']
+
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -229,6 +253,63 @@ def init_db():
             c.execute(f'ALTER TABLE reminder_logs ADD COLUMN {col}')
         except sqlite3.OperationalError:
             pass
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS reminder_strategies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    trigger_conditions TEXT NOT NULL,
+                    escalation_order TEXT NOT NULL,
+                    cooldown_minutes INTEGER NOT NULL DEFAULT 60,
+                    timeout_hours INTEGER NOT NULL DEFAULT 24,
+                    notify_targets TEXT NOT NULL,
+                    scope_filter TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'DRAFT',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_by INTEGER,
+                    updated_at TIMESTAMP,
+                    FOREIGN KEY (created_by) REFERENCES users(id),
+                    FOREIGN KEY (updated_by) REFERENCES users(id))''')
+    
+    for col in ['priority', 'updated_by', 'updated_at']:
+        try:
+            c.execute(f'ALTER TABLE reminder_strategies ADD COLUMN {col}')
+        except sqlite3.OperationalError:
+            pass
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS reminder_strategy_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    operator_id INTEGER NOT NULL,
+                    detail TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (strategy_id) REFERENCES reminder_strategies(id),
+                    FOREIGN KEY (operator_id) REFERENCES users(id))''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS reminder_strategy_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id INTEGER NOT NULL,
+                    snapshot_data TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (strategy_id) REFERENCES reminder_strategies(id),
+                    FOREIGN KEY (created_by) REFERENCES users(id))''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS reminder_strategy_applied (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id INTEGER NOT NULL,
+                    review_id INTEGER NOT NULL,
+                    escalation_level INTEGER NOT NULL DEFAULT 0,
+                    last_reminded_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (strategy_id) REFERENCES reminder_strategies(id),
+                    FOREIGN KEY (review_id) REFERENCES review_items(id),
+                    UNIQUE(strategy_id, review_id))''')
     
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
@@ -1579,6 +1660,789 @@ def get_reminder_stats():
         'overdue_pending': overdue_pending,
         'escalated_pending': escalated_pending
     })
+
+def check_strategy_permission(operator_id, db):
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return False, '操作员不存在'
+    if operator['role'] not in STRATEGY_PERMISSION_ROLES:
+        return False, f'只有{",".join(STRATEGY_PERMISSION_ROLES)}角色才能操作催办策略'
+    return True, None
+
+def enrich_strategy(db, strategy):
+    strategy['status_name'] = STRATEGY_STATUS_NAME.get(strategy['status'], strategy['status'])
+    creator = db.execute('SELECT username FROM users WHERE id = ?', (strategy['created_by'],)).fetchone()
+    strategy['creator_name'] = creator['username'] if creator else None
+    if strategy.get('updated_by'):
+        updator = db.execute('SELECT username FROM users WHERE id = ?', (strategy['updated_by'],)).fetchone()
+        strategy['updator_name'] = updator['username'] if updator else None
+    else:
+        strategy['updator_name'] = None
+    try:
+        strategy['trigger_conditions'] = json.loads(strategy['trigger_conditions']) if strategy.get('trigger_conditions') else {}
+        strategy['escalation_order'] = json.loads(strategy['escalation_order']) if strategy.get('escalation_order') else []
+        strategy['notify_targets'] = json.loads(strategy['notify_targets']) if strategy.get('notify_targets') else []
+        strategy['scope_filter'] = json.loads(strategy['scope_filter']) if strategy.get('scope_filter') else {}
+    except Exception:
+        pass
+    return strategy
+
+def add_strategy_log(db, strategy_id, action, operator_id, detail=None):
+    db.execute('''INSERT INTO reminder_strategy_logs 
+                  (strategy_id, action, operator_id, detail)
+                  VALUES (?, ?, ?, ?)''',
+               (strategy_id, action, operator_id, json.dumps(detail, ensure_ascii=False) if detail else None))
+
+def save_strategy_snapshot(db, strategy_id, operator_id):
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return
+    snapshot_data = {
+        'name': strategy['name'],
+        'description': strategy['description'],
+        'trigger_conditions': strategy['trigger_conditions'],
+        'escalation_order': strategy['escalation_order'],
+        'cooldown_minutes': strategy['cooldown_minutes'],
+        'timeout_hours': strategy['timeout_hours'],
+        'notify_targets': strategy['notify_targets'],
+        'scope_filter': strategy['scope_filter'],
+        'priority': strategy['priority'],
+        'status': strategy['status'],
+        'version': strategy['version']
+    }
+    db.execute('''INSERT INTO reminder_strategy_snapshots 
+                  (strategy_id, snapshot_data, version, created_by)
+                  VALUES (?, ?, ?, ?)''',
+               (strategy_id, json.dumps(snapshot_data, ensure_ascii=False), strategy['version'], operator_id))
+
+def get_reviews_for_strategy(db, strategy):
+    scope = strategy['scope_filter'] if isinstance(strategy['scope_filter'], dict) else json.loads(strategy['scope_filter'])
+    trigger = strategy['trigger_conditions'] if isinstance(strategy['trigger_conditions'], dict) else json.loads(strategy['trigger_conditions'])
+    
+    query = '''SELECT r.*, bx.box_no, b.batch_no, u.username as creator_name
+               FROM review_items r
+               JOIN boxes bx ON r.box_id = bx.id
+               JOIN batches b ON r.batch_id = b.id
+               JOIN users u ON r.created_by = u.id
+               WHERE r.status != 'CLOSED' '''
+    params = []
+    
+    if scope.get('batch_ids'):
+        placeholders = ','.join(['?'] * len(scope['batch_ids']))
+        query += f' AND r.batch_id IN ({placeholders})'
+        params.extend(scope['batch_ids'])
+    
+    if scope.get('box_ids'):
+        placeholders = ','.join(['?'] * len(scope['box_ids']))
+        query += f' AND r.box_id IN ({placeholders})'
+        params.extend(scope['box_ids'])
+    
+    if trigger.get('issue_types'):
+        placeholders = ','.join(['?'] * len(trigger['issue_types']))
+        query += f' AND r.issue_type IN ({placeholders})'
+        params.extend(trigger['issue_types'])
+    
+    if trigger.get('statuses'):
+        placeholders = ','.join(['?'] * len(trigger['statuses']))
+        query += f' AND r.status IN ({placeholders})'
+        params.extend(trigger['statuses'])
+    
+    if trigger.get('min_hours_open'):
+        query += f" AND (julianday('now') - julianday(r.created_at)) * 24 >= ?"
+        params.append(trigger['min_hours_open'])
+    
+    if trigger.get('is_overdue'):
+        query += " AND r.deadline IS NOT NULL AND DATE(r.deadline) < DATE('now')"
+    
+    if trigger.get('has_pending_reminder') == False:
+        query += " AND NOT EXISTS (SELECT 1 FROM reminders rm WHERE rm.review_id = r.id AND rm.status = 'PENDING')"
+    elif trigger.get('has_pending_reminder') == True:
+        query += " AND EXISTS (SELECT 1 FROM reminders rm WHERE rm.review_id = r.id AND rm.status = 'PENDING')"
+    
+    query += ' ORDER BY r.created_at DESC'
+    
+    return db.execute(query, params).fetchall()
+
+def check_conflict_and_resolve(db, reviews, strategies):
+    results = []
+    for review in reviews:
+        matched_strategies = []
+        for strategy in strategies:
+            if review_matches_strategy(review, strategy):
+                matched_strategies.append(strategy)
+        
+        if len(matched_strategies) == 0:
+            continue
+        elif len(matched_strategies) == 1:
+            results.append({
+                'review_id': review['id'],
+                'review': dict(review),
+                'matched_strategies': [dict(s) for s in matched_strategies],
+                'conflict': False,
+                'selected_strategy': dict(matched_strategies[0]),
+                'resolution': '唯一匹配'
+            })
+        else:
+            sorted_strategies = sorted(matched_strategies, key=lambda s: (-s['priority'], s['id']))
+            selected = sorted_strategies[0]
+            results.append({
+                'review_id': review['id'],
+                'review': dict(review),
+                'matched_strategies': [dict(s) for s in matched_strategies],
+                'conflict': True,
+                'selected_strategy': dict(selected),
+                'resolution': f'冲突裁决：选择优先级最高的策略"{selected["name"]}"(优先级={selected["priority"]})'
+            })
+    return results
+
+def review_matches_strategy(review, strategy):
+    scope = strategy['scope_filter'] if isinstance(strategy['scope_filter'], dict) else json.loads(strategy['scope_filter'])
+    trigger = strategy['trigger_conditions'] if isinstance(strategy['trigger_conditions'], dict) else json.loads(strategy['trigger_conditions'])
+    
+    if scope.get('batch_ids') and review['batch_id'] not in scope['batch_ids']:
+        return False
+    if scope.get('box_ids') and review['box_id'] not in scope['box_ids']:
+        return False
+    if trigger.get('issue_types') and review['issue_type'] not in trigger['issue_types']:
+        return False
+    if trigger.get('statuses') and review['status'] not in trigger['statuses']:
+        return False
+    
+    return True
+
+def calculate_escalation_level(db, strategy, review):
+    applied = db.execute('''SELECT * FROM reminder_strategy_applied 
+                            WHERE strategy_id = ? AND review_id = ?''',
+                         (strategy['id'], review['id'])).fetchone()
+    
+    escalation_order = strategy['escalation_order'] if isinstance(strategy['escalation_order'], list) else json.loads(strategy['escalation_order'])
+    
+    if not applied:
+        return 0, escalation_order[0] if escalation_order else None
+    
+    current_level = applied['escalation_level']
+    timeout_hours = strategy['timeout_hours']
+    
+    last_reminder = db.execute('''SELECT MAX(created_at) as last_at FROM reminders 
+                                  WHERE review_id = ?''', (review['id'],)).fetchone()
+    
+    if last_reminder and last_reminder['last_at']:
+        hours_since = db.execute("SELECT (julianday('now') - julianday(?)) * 24 as hours",
+                                 (last_reminder['last_at'],)).fetchone()['hours']
+        if hours_since and hours_since >= timeout_hours:
+            next_level = min(current_level + 1, len(escalation_order) - 1)
+            return next_level, escalation_order[next_level] if next_level < len(escalation_order) else None
+    
+    return current_level, escalation_order[current_level] if current_level < len(escalation_order) else None
+
+def check_cooldown(db, strategy, review):
+    applied = db.execute('''SELECT * FROM reminder_strategy_applied 
+                            WHERE strategy_id = ? AND review_id = ?''',
+                         (strategy['id'], review['id'])).fetchone()
+    
+    if not applied or not applied['last_reminded_at']:
+        return False, None
+    
+    cooldown_minutes = strategy['cooldown_minutes']
+    minutes_since = db.execute("SELECT (julianday('now') - julianday(?)) * 1440 as minutes",
+                               (applied['last_reminded_at'],)).fetchone()['minutes']
+    
+    if minutes_since and minutes_since < cooldown_minutes:
+        return True, cooldown_minutes - minutes_since
+    
+    return False, None
+
+@app.route('/api/strategies', methods=['GET'])
+def get_strategies():
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = request.args.get('operator_id', type=int)
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    status_filter = request.args.get('status')
+    query = 'SELECT * FROM reminder_strategies'
+    params = []
+    if status_filter:
+        query += ' WHERE status = ?'
+        params.append(status_filter)
+    query += ' ORDER BY priority DESC, created_at DESC'
+    
+    strategies = db.execute(query, params).fetchall()
+    for s in strategies:
+        enrich_strategy(db, s)
+    return jsonify(strategies)
+
+@app.route('/api/strategies/<int:strategy_id>', methods=['GET'])
+def get_strategy_detail(strategy_id):
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = request.args.get('operator_id', type=int)
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return jsonify({'error': '策略不存在'}), 404
+    
+    enrich_strategy(db, strategy)
+    
+    logs = db.execute('''SELECT l.*, u.username as operator_name
+                         FROM reminder_strategy_logs l JOIN users u ON l.operator_id = u.id
+                         WHERE l.strategy_id = ? ORDER BY l.created_at DESC''',
+                      (strategy_id,)).fetchall()
+    for log in logs:
+        if log.get('detail'):
+            try:
+                log['detail'] = json.loads(log['detail'])
+            except Exception:
+                pass
+    
+    snapshots = db.execute('''SELECT s.*, u.username as creator_name
+                              FROM reminder_strategy_snapshots s JOIN users u ON s.created_by = u.id
+                              WHERE s.strategy_id = ? ORDER BY s.created_at DESC''',
+                           (strategy_id,)).fetchall()
+    for snap in snapshots:
+        if snap.get('snapshot_data'):
+            try:
+                snap['snapshot_data'] = json.loads(snap['snapshot_data'])
+            except Exception:
+                pass
+    
+    return jsonify({
+        'strategy': strategy,
+        'logs': logs,
+        'snapshots': snapshots
+    })
+
+@app.route('/api/strategies', methods=['POST'])
+def create_strategy():
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'error': '策略名称不能为空'}), 400
+    
+    existing = db.execute('SELECT * FROM reminder_strategies WHERE name = ?', (name,)).fetchone()
+    if existing:
+        return jsonify({'error': '策略名称已存在'}), 409
+    
+    try:
+        trigger_conditions = json.dumps(data.get('trigger_conditions', {}), ensure_ascii=False)
+        escalation_order = json.dumps(data.get('escalation_order', []), ensure_ascii=False)
+        notify_targets = json.dumps(data.get('notify_targets', []), ensure_ascii=False)
+        scope_filter = json.dumps(data.get('scope_filter', {}), ensure_ascii=False)
+    except Exception as e:
+        return jsonify({'error': f'JSON字段格式错误: {str(e)}'}), 400
+    
+    try:
+        cursor = db.execute('''INSERT INTO reminder_strategies 
+                              (name, description, trigger_conditions, escalation_order,
+                               cooldown_minutes, timeout_hours, notify_targets, scope_filter,
+                               priority, status, created_by)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)''',
+                           (name, data.get('description', ''), trigger_conditions, escalation_order,
+                            data.get('cooldown_minutes', 60), data.get('timeout_hours', 24),
+                            notify_targets, scope_filter, data.get('priority', 0), operator_id))
+        strategy_id = cursor.lastrowid
+        
+        save_strategy_snapshot(db, strategy_id, operator_id)
+        add_strategy_log(db, strategy_id, STRATEGY_ACTION['CREATE'], operator_id, {'name': name})
+        
+        db.commit()
+        
+        strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+        enrich_strategy(db, strategy)
+        return jsonify(strategy), 201
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'创建失败: {str(e)}'}), 500
+
+@app.route('/api/strategies/<int:strategy_id>', methods=['PUT'])
+def update_strategy(strategy_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return jsonify({'error': '策略不存在'}), 404
+    
+    if strategy['status'] == 'ACTIVE':
+        return jsonify({'error': '已启用的策略不能直接修改，请先停用'}), 400
+    
+    name = data.get('name', strategy['name']).strip()
+    if name != strategy['name']:
+        existing = db.execute('SELECT * FROM reminder_strategies WHERE name = ? AND id != ?', (name, strategy_id)).fetchone()
+        if existing:
+            return jsonify({'error': '策略名称已存在'}), 409
+    
+    try:
+        trigger_conditions = json.dumps(data.get('trigger_conditions', json.loads(strategy['trigger_conditions'])), ensure_ascii=False)
+        escalation_order = json.dumps(data.get('escalation_order', json.loads(strategy['escalation_order'])), ensure_ascii=False)
+        notify_targets = json.dumps(data.get('notify_targets', json.loads(strategy['notify_targets'])), ensure_ascii=False)
+        scope_filter = json.dumps(data.get('scope_filter', json.loads(strategy['scope_filter'])), ensure_ascii=False)
+    except Exception as e:
+        return jsonify({'error': f'JSON字段格式错误: {str(e)}'}), 400
+    
+    old_version = strategy['version']
+    new_version = old_version + 1
+    
+    db.execute('''UPDATE reminder_strategies SET
+                  name = ?, description = ?, trigger_conditions = ?, escalation_order = ?,
+                  cooldown_minutes = ?, timeout_hours = ?, notify_targets = ?, scope_filter = ?,
+                  priority = ?, version = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''',
+               (name, data.get('description', strategy.get('description', '')),
+                trigger_conditions, escalation_order,
+                data.get('cooldown_minutes', strategy['cooldown_minutes']),
+                data.get('timeout_hours', strategy['timeout_hours']),
+                notify_targets, scope_filter,
+                data.get('priority', strategy['priority']),
+                new_version, operator_id, strategy_id))
+    
+    save_strategy_snapshot(db, strategy_id, operator_id)
+    add_strategy_log(db, strategy_id, STRATEGY_ACTION['UPDATE'], operator_id,
+                     {'old_version': old_version, 'new_version': new_version, 'changes': data})
+    
+    db.commit()
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    enrich_strategy(db, strategy)
+    return jsonify(strategy)
+
+@app.route('/api/strategies/<int:strategy_id>/enable', methods=['POST'])
+def enable_strategy(strategy_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return jsonify({'error': '策略不存在'}), 404
+    
+    if strategy['status'] == 'ACTIVE':
+        return jsonify({'error': '策略已经是启用状态'}), 400
+    
+    db.execute("UPDATE reminder_strategies SET status = 'ACTIVE', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+               (operator_id, strategy_id))
+    
+    add_strategy_log(db, strategy_id, STRATEGY_ACTION['ENABLE'], operator_id)
+    db.commit()
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    enrich_strategy(db, strategy)
+    return jsonify(strategy)
+
+@app.route('/api/strategies/<int:strategy_id>/disable', methods=['POST'])
+def disable_strategy(strategy_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return jsonify({'error': '策略不存在'}), 404
+    
+    if strategy['status'] != 'ACTIVE':
+        return jsonify({'error': '策略不是启用状态'}), 400
+    
+    db.execute("UPDATE reminder_strategies SET status = 'INACTIVE', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+               (operator_id, strategy_id))
+    
+    add_strategy_log(db, strategy_id, STRATEGY_ACTION['DISABLE'], operator_id)
+    db.commit()
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    enrich_strategy(db, strategy)
+    return jsonify(strategy)
+
+@app.route('/api/strategies/<int:strategy_id>/rollback', methods=['POST'])
+def rollback_strategy(strategy_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return jsonify({'error': '策略不存在'}), 404
+    
+    if strategy['status'] == 'ACTIVE':
+        return jsonify({'error': '已启用的策略不能回滚，请先停用'}), 400
+    
+    target_version = data.get('target_version')
+    if target_version is None:
+        target_version = strategy['version'] - 1
+    
+    if target_version < 1:
+        return jsonify({'error': '没有更早的版本可以回滚'}), 400
+    
+    snapshot = db.execute('''SELECT * FROM reminder_strategy_snapshots 
+                             WHERE strategy_id = ? AND version = ? 
+                             ORDER BY created_at DESC LIMIT 1''',
+                          (strategy_id, target_version)).fetchone()
+    if not snapshot:
+        return jsonify({'error': f'找不到版本 {target_version} 的快照'}), 404
+    
+    try:
+        snap_data = json.loads(snapshot['snapshot_data'])
+    except Exception as e:
+        return jsonify({'error': f'快照数据解析失败: {str(e)}'}), 500
+    
+    old_version = strategy['version']
+    new_version = target_version
+    
+    db.execute('''UPDATE reminder_strategies SET
+                  name = ?, description = ?, trigger_conditions = ?, escalation_order = ?,
+                  cooldown_minutes = ?, timeout_hours = ?, notify_targets = ?, scope_filter = ?,
+                  priority = ?, status = ?, version = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''',
+               (snap_data['name'], snap_data.get('description', ''),
+                snap_data['trigger_conditions'], snap_data['escalation_order'],
+                snap_data['cooldown_minutes'], snap_data['timeout_hours'],
+                snap_data['notify_targets'], snap_data['scope_filter'],
+                snap_data['priority'], snap_data['status'],
+                new_version, operator_id, strategy_id))
+    
+    save_strategy_snapshot(db, strategy_id, operator_id)
+    add_strategy_log(db, strategy_id, STRATEGY_ACTION['ROLLBACK'], operator_id,
+                     {'from_version': old_version, 'to_version': target_version, 'new_version': new_version})
+    
+    db.commit()
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    enrich_strategy(db, strategy)
+    return jsonify(strategy)
+
+@app.route('/api/strategies/<int:strategy_id>/preview', methods=['POST'])
+def preview_strategy(strategy_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    if strategy_id == 0:
+        strategy_data = data.get('strategy', {k: v for k, v in data.items() if k != 'operator_id'})
+        if not strategy_data or 'name' not in strategy_data:
+            return jsonify({'error': '草稿预演需要提供策略数据，包含name字段'}), 400
+        
+        strategy = {
+            'id': 0,
+            'name': strategy_data.get('name', '草稿策略'),
+            'description': strategy_data.get('description', ''),
+            'trigger_conditions': json.dumps(strategy_data.get('trigger_conditions', {}), ensure_ascii=False),
+            'escalation_order': json.dumps(strategy_data.get('escalation_order', []), ensure_ascii=False),
+            'cooldown_minutes': strategy_data.get('cooldown_minutes', 60),
+            'timeout_hours': strategy_data.get('timeout_hours', 24),
+            'notify_targets': json.dumps(strategy_data.get('notify_targets', []), ensure_ascii=False),
+            'scope_filter': json.dumps(strategy_data.get('scope_filter', {}), ensure_ascii=False),
+            'priority': strategy_data.get('priority', 0),
+            'status': 'DRAFT',
+            'version': strategy_data.get('version', 1),
+            'created_by': operator_id,
+            'updated_by': operator_id,
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        }
+        enrich_strategy(db, strategy)
+    else:
+        strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+        if not strategy:
+            return jsonify({'error': '策略不存在'}), 404
+        enrich_strategy(db, strategy)
+    
+    matching_reviews = get_reviews_for_strategy(db, strategy)
+    
+    active_strategies = db.execute("SELECT * FROM reminder_strategies WHERE status = 'ACTIVE'").fetchall()
+    for s in active_strategies:
+        enrich_strategy(db, s)
+    
+    if strategy['status'] != 'ACTIVE':
+        all_strategies = active_strategies + [strategy]
+    else:
+        all_strategies = active_strategies
+    
+    conflict_results = check_conflict_and_resolve(db, matching_reviews, all_strategies)
+    
+    preview_details = []
+    for result in conflict_results:
+        review = result['review']
+        selected = result['selected_strategy']
+        
+        escalation_level, escalation_step = calculate_escalation_level(db, selected, review)
+        in_cooldown, cooldown_remaining = check_cooldown(db, selected, review)
+        
+        pending_reminders = db.execute('''SELECT COUNT(*) as cnt FROM reminders 
+                                          WHERE review_id = ? AND status = 'PENDING' ''',
+                                       (review['id'],)).fetchone()['cnt']
+        
+        last_reminder = db.execute('''SELECT MAX(created_at) as last_at FROM reminders 
+                                      WHERE review_id = ?''', (review['id'],)).fetchone()
+        
+        preview_details.append({
+            **result,
+            'escalation_level': escalation_level,
+            'escalation_step': escalation_step,
+            'in_cooldown': in_cooldown,
+            'cooldown_remaining_minutes': round(cooldown_remaining, 1) if cooldown_remaining else None,
+            'pending_reminders': pending_reminders,
+            'last_reminded_at': last_reminder['last_at'] if last_reminder else None,
+            'will_trigger_reminder': not in_cooldown,
+            'will_escalate': escalation_level > 0
+        })
+    
+    return jsonify({
+        'strategy': strategy,
+        'total_matches': len(preview_details),
+        'conflict_count': sum(1 for r in preview_details if r['conflict']),
+        'will_trigger_count': sum(1 for r in preview_details if r['will_trigger_reminder']),
+        'will_escalate_count': sum(1 for r in preview_details if r['will_escalate']),
+        'details': preview_details
+    })
+
+@app.route('/api/strategies/import', methods=['POST'])
+def import_strategies():
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    import_data = data.get('strategies')
+    if not import_data or not isinstance(import_data, list):
+        return jsonify({'error': '导入数据格式错误，应为策略数组'}), 400
+    
+    validation_errors = []
+    valid_strategies = []
+    
+    for idx, s_data in enumerate(import_data):
+        errors = []
+        if not s_data.get('name'):
+            errors.append('策略名称不能为空')
+        
+        if not isinstance(s_data.get('trigger_conditions', {}), dict):
+            errors.append('trigger_conditions应为对象')
+        
+        if not isinstance(s_data.get('escalation_order', []), list):
+            errors.append('escalation_order应为数组')
+        
+        if not isinstance(s_data.get('notify_targets', []), list):
+            errors.append('notify_targets应为数组')
+        
+        if not isinstance(s_data.get('scope_filter', {}), dict):
+            errors.append('scope_filter应为对象')
+        
+        if not isinstance(s_data.get('cooldown_minutes', 60), (int, float)) or s_data.get('cooldown_minutes', 60) <= 0:
+            errors.append('cooldown_minutes应为正整数')
+        
+        if not isinstance(s_data.get('timeout_hours', 24), (int, float)) or s_data.get('timeout_hours', 24) <= 0:
+            errors.append('timeout_hours应为正整数')
+        
+        existing = db.execute('SELECT * FROM reminder_strategies WHERE name = ?', (s_data['name'],)).fetchone()
+        if existing:
+            errors.append(f'策略名称"{s_data["name"]}"已存在')
+        
+        for other in valid_strategies:
+            if other['name'] == s_data['name']:
+                errors.append(f'导入数据中存在重复的策略名称"{s_data["name"]}"')
+                break
+        
+        if errors:
+            validation_errors.append({'index': idx, 'name': s_data.get('name', f'策略{idx}'), 'errors': errors})
+        else:
+            valid_strategies.append(s_data)
+    
+    if validation_errors:
+        return jsonify({
+            'error': '导入数据校验失败',
+            'errors': validation_errors,
+            'validation_errors': validation_errors,
+            'valid_count': len(valid_strategies)
+        }), 400
+    
+    imported_ids = []
+    try:
+        for s_data in valid_strategies:
+            trigger_conditions = json.dumps(s_data.get('trigger_conditions', {}), ensure_ascii=False)
+            escalation_order = json.dumps(s_data.get('escalation_order', []), ensure_ascii=False)
+            notify_targets = json.dumps(s_data.get('notify_targets', []), ensure_ascii=False)
+            scope_filter = json.dumps(s_data.get('scope_filter', {}), ensure_ascii=False)
+            
+            cursor = db.execute('''INSERT INTO reminder_strategies 
+                                  (name, description, trigger_conditions, escalation_order,
+                                   cooldown_minutes, timeout_hours, notify_targets, scope_filter,
+                                   priority, status, version, created_by)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)''',
+                               (s_data['name'], s_data.get('description', ''),
+                                trigger_conditions, escalation_order,
+                                s_data.get('cooldown_minutes', 60),
+                                s_data.get('timeout_hours', 24),
+                                notify_targets, scope_filter,
+                                s_data.get('priority', 0),
+                                s_data.get('version', 1), operator_id))
+            strategy_id = cursor.lastrowid
+            imported_ids.append(strategy_id)
+            
+            save_strategy_snapshot(db, strategy_id, operator_id)
+            add_strategy_log(db, strategy_id, STRATEGY_ACTION['IMPORT'], operator_id,
+                             {'imported_name': s_data['name'], 'source_version': s_data.get('version', 1)})
+        
+        db.commit()
+        
+        strategies = []
+        for sid in imported_ids:
+            s = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (sid,)).fetchone()
+            enrich_strategy(db, s)
+            strategies.append(s)
+        
+        return jsonify({
+            'success': True,
+            'imported_count': len(imported_ids),
+            'imported_ids': imported_ids,
+            'strategies': strategies
+        })
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'导入失败: {str(e)}'}), 500
+
+@app.route('/api/strategies/export', methods=['GET'])
+def export_strategies():
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = request.args.get('operator_id', type=int)
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy_ids = request.args.get('ids')
+    if strategy_ids:
+        ids = [int(x) for x in strategy_ids.split(',') if x.strip()]
+        placeholders = ','.join(['?'] * len(ids))
+        query = f'SELECT * FROM reminder_strategies WHERE id IN ({placeholders})'
+        strategies = db.execute(query, ids).fetchall()
+    else:
+        strategies = db.execute('SELECT * FROM reminder_strategies ORDER BY priority DESC, created_at DESC').fetchall()
+    
+    export_data = []
+    for s in strategies:
+        add_strategy_log(db, s['id'], STRATEGY_ACTION['EXPORT'], operator_id, {'exported_at': datetime.now().isoformat()})
+        
+        export_data.append({
+            'name': s['name'],
+            'description': s['description'],
+            'trigger_conditions': json.loads(s['trigger_conditions']) if s['trigger_conditions'] else {},
+            'escalation_order': json.loads(s['escalation_order']) if s['escalation_order'] else [],
+            'cooldown_minutes': s['cooldown_minutes'],
+            'timeout_hours': s['timeout_hours'],
+            'notify_targets': json.loads(s['notify_targets']) if s['notify_targets'] else [],
+            'scope_filter': json.loads(s['scope_filter']) if s['scope_filter'] else {},
+            'priority': s['priority'],
+            'status': s['status'],
+            'version': s['version'],
+            'export_info': {
+                'exported_at': datetime.now().isoformat(),
+                'exported_by': db.execute('SELECT username FROM users WHERE id = ?', (operator_id,)).fetchone()['username'],
+                'original_id': s['id'],
+                'original_created_at': s['created_at'],
+                'original_updated_at': s['updated_at']
+            }
+        })
+    
+    db.commit()
+    
+    operator = db.execute('SELECT username, role FROM users WHERE id = ?', (operator_id,)).fetchone()
+    exported_by = f"{operator['username']} ({operator['role']})" if operator else str(operator_id)
+    
+    return jsonify({
+        'version': '1.0',
+        'export_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'exported_at': datetime.now().isoformat(),
+        'exported_by': exported_by,
+        'exported_count': len(export_data),
+        'export_version': '1.0',
+        'strategies': export_data
+    })
+
+@app.route('/api/strategies/logs', methods=['GET'])
+def get_strategy_logs():
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = request.args.get('operator_id', type=int)
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy_id = request.args.get('strategy_id', type=int)
+    query = '''SELECT l.*, s.name as strategy_name, u.username as operator_name
+               FROM reminder_strategy_logs l
+               JOIN reminder_strategies s ON l.strategy_id = s.id
+               JOIN users u ON l.operator_id = u.id'''
+    params = []
+    if strategy_id:
+        query += ' WHERE l.strategy_id = ?'
+        params.append(strategy_id)
+    query += ' ORDER BY l.created_at DESC LIMIT 100'
+    
+    logs = db.execute(query, params).fetchall()
+    for log in logs:
+        if log.get('detail'):
+            try:
+                log['detail'] = json.loads(log['detail'])
+            except Exception:
+                pass
+    return jsonify(logs)
 
 if __name__ == '__main__':
     init_db()
