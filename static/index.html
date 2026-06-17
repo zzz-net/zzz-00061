@@ -242,6 +242,8 @@ tr:hover { background: #f8f9fa; }
             <span style="color:#c62828;">特急{{ reminderStats.critical }}</span>
             <span style="color:#e65100;">紧急{{ reminderStats.urgent }}</span>
             <span style="color:#2e7d32;">普通{{ reminderStats.normal }}</span>
+            <span style="color:#c62828;">超期{{ reminderStats.overdue_pending }}</span>
+            <span style="color:#d81b60;">已升级{{ reminderStats.escalated_pending }}</span>
             今日已处理{{ reminderStats.processed_today }}
           </span>
         </div>
@@ -261,6 +263,7 @@ tr:hover { background: #f8f9fa; }
               <div>
                 <span :class="['urgency-tag', 'urgency-' + rm.urgency]">{{ rm.urgency === 'CRITICAL' ? '特急' : rm.urgency === 'URGENT' ? '紧急' : '普通' }}</span>
                 <span v-if="rm.is_escalated" class="reminder-badge escalated">已升级</span>
+                <span v-if="rm.is_overdue" class="reminder-badge" style="background:#ffebee;color:#c62828;margin-left:6px;">已超期</span>
                 <span style="font-weight: 500; margin-left: 8px;">复核项#{{ rm.review_id }}</span>
               </div>
               <span class="reminder-meta">{{ rm.created_at }}</span>
@@ -289,6 +292,7 @@ tr:hover { background: #f8f9fa; }
               <div>
                 <span :class="['urgency-tag', 'urgency-' + rm.urgency]">{{ rm.urgency === 'CRITICAL' ? '特急' : rm.urgency === 'URGENT' ? '紧急' : '普通' }}</span>
                 <span v-if="rm.is_escalated" class="reminder-badge escalated">已升级</span>
+                <span v-if="rm.is_overdue" class="reminder-badge" style="background:#ffebee;color:#c62828;margin-left:6px;">已超期</span>
                 <span style="font-weight: 500; margin-left: 8px;">复核项#{{ rm.review_id }}</span>
               </div>
               <span class="reminder-meta">{{ rm.created_at }}</span>
@@ -317,6 +321,7 @@ tr:hover { background: #f8f9fa; }
               <div>
                 <span :class="['urgency-tag', 'urgency-' + rm.urgency]">{{ rm.urgency === 'CRITICAL' ? '特急' : rm.urgency === 'URGENT' ? '紧急' : '普通' }}</span>
                 <span v-if="rm.is_escalated" class="reminder-badge escalated">已升级</span>
+                <span v-if="rm.is_overdue" class="reminder-badge" style="background:#ffebee;color:#c62828;margin-left:6px;">已超期</span>
                 <span style="font-weight: 500; margin-left: 8px;">复核项#{{ rm.review_id }}</span>
               </div>
               <span class="reminder-meta">{{ rm.created_at }}</span>
@@ -547,6 +552,7 @@ tr:hover { background: #f8f9fa; }
             <div>
               <div class="review-card-title">
                 复核项#{{ rv.id }} - 【{{ rv.issue_type }}】
+                <span v-if="rv.is_overdue" class="reminder-badge" style="background:#ffebee;color:#c62828;margin-left:8px;">已超期</span>
               </div>
               <div class="review-card-meta">
                 盒号: {{ rv.box_no }} | 
@@ -565,14 +571,17 @@ tr:hover { background: #f8f9fa; }
               <label>处理说明：</label>{{ rv.handling_note }}
             </div>
             <div v-if="rv.reminder_total > 0" style="margin-top: 8px; font-size: 13px; color: #555;">
-              <span class="reminder-badge pending">催办: {{ rv.reminder_total }}条(待处理{{ rv.reminder_pending }}, 已处理{{ rv.reminder_processed }})</span>
+              <span class="reminder-badge pending">催办: {{ rv.reminder_total }}条(待处理{{ rv.reminder_pending }}, 已处理{{ rv.reminder_processed }}, 已取消{{ rv.reminder_cancelled || 0 }})</span>
               <span v-if="rv.reminder_latest_urgency" style="margin-left: 6px;">
                 最近催办: {{ rv.reminder_latest_creator }}
                 <span :class="['urgency-tag', 'urgency-' + rv.reminder_latest_urgency]" style="font-size: 11px; padding: 1px 6px;">
-                  {{ rv.reminder_latest_urgency === 'CRITICAL' ? '特急' : rv.reminder_latest_urgency === 'URGENT' ? '紧急' : '普通' }}
+                  {{ rv.reminder_latest_urgency_name }}
                 </span>
               </span>
               <span v-if="rv.reminder_escalated > 0" class="reminder-badge escalated" style="margin-left: 6px;">已升级{{ rv.reminder_escalated }}条</span>
+              <span v-if="rv.reminder_latest_process_note" style="display: block; margin-top: 4px; padding-left: 4px;">
+                最近处理: {{ rv.reminder_latest_processor || '-' }} - {{ rv.reminder_latest_process_note }}
+              </span>
             </div>
           </div>
           <div class="review-actions">
@@ -965,7 +974,7 @@ createApp({
     const newReminder = ref({ reason: '', expected_completion: '', urgency: 'NORMAL', is_escalated: false });
     const processReminderNote = ref('');
     const pendingReminders = ref({ CRITICAL: [], URGENT: [], NORMAL: [] });
-    const reminderStats = ref({ total_pending: 0, critical: 0, urgent: 0, normal: 0, processed_today: 0 });
+    const reminderStats = ref({ total_pending: 0, critical: 0, urgent: 0, normal: 0, processed_today: 0, overdue_pending: 0, escalated_pending: 0 });
     const reviewReminders = ref([]);
 
     const currentUser = computed(() => users.value.find(u => u.id === currentUserId.value));
@@ -1399,6 +1408,9 @@ createApp({
         showAlert(action + '！');
         showReminderModal.value = false;
         viewBatch(selectedBatchId.value);
+        loadReminderStats();
+      } else if (res.status === 429) {
+        showAlert(result.error || '操作太频繁，请稍后再试', 'error');
       } else {
         showAlert(result.error || '催办发起失败', 'error');
       }
@@ -1414,7 +1426,16 @@ createApp({
     async function loadReminderStats() {
       const res = await fetch(`${API}/reminders/stats`);
       if (res.ok) {
-        reminderStats.value = await res.json();
+        const data = await res.json();
+        reminderStats.value = {
+          total_pending: data.total_pending || 0,
+          critical: (data.by_urgency && data.by_urgency.CRITICAL) || 0,
+          urgent: (data.by_urgency && data.by_urgency.URGENT) || 0,
+          normal: (data.by_urgency && data.by_urgency.NORMAL) || 0,
+          processed_today: data.processed_today || 0,
+          overdue_pending: data.overdue_pending || 0,
+          escalated_pending: data.escalated_pending || 0
+        };
       }
     }
 

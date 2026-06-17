@@ -113,7 +113,7 @@ def main():
 
     expected_completion = (datetime.now() + timedelta(days=5)).strftime('%Y-%m-%d')
     r = requests.post(f'{API}/reviews/{rvid_23}/reminders', json={
-        'created_by': receiver['id'],
+        'operator_id': receiver['id'],
         'reason': '缺页问题未解决，请尽快补档',
         'expected_completion': expected_completion,
         'urgency': 'NORMAL',
@@ -134,9 +134,9 @@ def main():
     assert_true(rv_23.get('reminder_pending', 0) >= 1, '批次详情reminder_pending>=1')
     assert_true(rv_23.get('reminder_escalated', 0) == 0, '批次详情reminder_escalated=0(未升级)')
     assert_true(rv_23.get('reminder_processed', 0) == 0, '批次详情reminder_processed=0')
-    assert_equal(rv_23.get('last_reminder_by'), receiver['username'], 'last_reminder_by为接收方用户名')
-    assert_true(rv_23.get('last_reminder_at') is not None, 'last_reminder_at有值')
-    assert_equal(rv_23.get('last_reminder_urgency'), 'NORMAL', 'last_reminder_urgency为NORMAL')
+    assert_equal(rv_23.get('reminder_latest_creator'), receiver['username'], 'reminder_latest_creator为接收方用户名')
+    assert_true(rv_23.get('reminder_latest_at') is not None, 'reminder_latest_at有值')
+    assert_equal(rv_23.get('reminder_latest_urgency'), 'NORMAL', 'reminder_latest_urgency为NORMAL')
 
     history_23 = requests.get(f'{API}/history/{bid_23}').json()
     reminder_his = next((h for h in history_23 if h['action'] == '发起催办'), None)
@@ -155,7 +155,7 @@ def main():
     rvid_24 = r.json()['id']
 
     r = requests.post(f'{API}/reviews/{rvid_24}/reminders', json={
-        'created_by': sender['id'],
+        'operator_id': sender['id'],
         'reason': '发送方尝试催办',
         'urgency': 'NORMAL'
     })
@@ -163,7 +163,7 @@ def main():
     assert_true('只有接收方才能发起催办' in r.json()['error'], '错误信息明确：只有接收方可催办')
 
     r = requests.post(f'{API}/reviews/{rvid_24}/reminders', json={
-        'created_by': receiver['id'],
+        'operator_id': receiver['id'],
         'reason': '接收方正常催办',
         'urgency': 'NORMAL'
     })
@@ -195,7 +195,7 @@ def main():
     rvid_25 = r.json()['id']
 
     r1 = requests.post(f'{API}/reviews/{rvid_25}/reminders', json={
-        'created_by': receiver['id'],
+        'operator_id': receiver['id'],
         'reason': '第一次催办',
         'urgency': 'NORMAL',
         'is_escalated': False
@@ -203,9 +203,15 @@ def main():
     assert_true(r1.status_code in (200, 201), '第一次催办成功')
     rm25_first = r1.json()
     first_id = rm25_first['id']
+    
+    conn25_setup = sqlite3.connect(DB_PATH)
+    c25_setup = conn25_setup.cursor()
+    c25_setup.execute("UPDATE reminders SET created_at = datetime('now', '-2 minutes') WHERE id = ?", (first_id,))
+    conn25_setup.commit()
+    conn25_setup.close()
 
     r2 = requests.post(f'{API}/reviews/{rvid_25}/reminders', json={
-        'created_by': receiver['id'],
+        'operator_id': receiver['id'],
         'reason': '第二次催办-补充',
         'urgency': 'URGENT',
         'is_escalated': True
@@ -219,7 +225,7 @@ def main():
     assert_true(rm25_merged['is_escalated'] == 1, '合并后is_escalated升级为1')
 
     r3 = requests.post(f'{API}/reviews/{rvid_25}/reminders', json={
-        'created_by': receiver['id'],
+        'operator_id': receiver['id'],
         'reason': '第三次催办-再次补充',
         'urgency': 'CRITICAL',
         'is_escalated': True
@@ -242,6 +248,44 @@ def main():
     conn25.close()
     print(f'{PASS} 25. 重复催办冲突合并 - 通过')
 
+    # ============ 测试25b：短时间重复催办拦截（429） ============
+    header('25b. 短时间重复催办拦截（429）')
+    bid_25b, box_ids_25b, _ = create_full_batch_and_sign(sender['id'], receiver['id'], 'RATE25B', box_count=1)
+    r = requests.post(f'{API}/reviews', json={
+        'batch_id': bid_25b, 'box_id': box_ids_25b[0],
+        'operator_id': receiver['id'],
+        'issue_type': '材料缺页', 'issue_description': 'RATE25B短时间拦截测试'
+    })
+    rvid_25b = r.json()['id']
+
+    r1 = requests.post(f'{API}/reviews/{rvid_25b}/reminders', json={
+        'operator_id': receiver['id'],
+        'reason': '第一次催办',
+        'urgency': 'NORMAL'
+    })
+    assert_true(r1.status_code in (200, 201), '第一次催办成功')
+    rm25b_id = r1.json()['id']
+
+    r2 = requests.post(f'{API}/reviews/{rvid_25b}/reminders', json={
+        'operator_id': receiver['id'],
+        'reason': '短时间内重复催办',
+        'urgency': 'URGENT'
+    })
+    assert_equal(r2.status_code, 429, '60秒内同一用户重复催办返回429拦截')
+    r2_data = r2.json()
+    assert_true('error' in r2_data, '429响应包含error字段')
+    assert_true('existing_reminder_id' in r2_data, '429响应包含existing_reminder_id')
+    assert_equal(r2_data['existing_reminder_id'], rm25b_id, 'existing_reminder_id指向已有催办')
+
+    time.sleep(2)
+    r3 = requests.post(f'{API}/reviews/{rvid_25b}/reminders', json={
+        'operator_id': receiver['id'],
+        'reason': '第三次催办(仍在窗口内)',
+        'urgency': 'CRITICAL'
+    })
+    assert_equal(r3.status_code, 429, '短时间内第三次催办仍被拦截')
+    print(f'{PASS} 25b. 短时间重复催办拦截（429） - 通过')
+
     # ============ 测试26：紧急程度分组 - 待办列表 ============
     header('26. 紧急程度分组 - 待办列表')
     bid_26a, box_ids_26a, _ = create_full_batch_and_sign(sender['id'], receiver['id'], 'URG26A')
@@ -255,7 +299,7 @@ def main():
     })
     rvid_26a = r.json()['id']
     requests.post(f'{API}/reviews/{rvid_26a}/reminders', json={
-        'created_by': receiver['id'], 'reason': '普通催办', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': '普通催办', 'urgency': 'NORMAL'
     })
 
     r = requests.post(f'{API}/reviews', json={
@@ -265,7 +309,7 @@ def main():
     })
     rvid_26b = r.json()['id']
     requests.post(f'{API}/reviews/{rvid_26b}/reminders', json={
-        'created_by': receiver['id'], 'reason': '紧急催办', 'urgency': 'URGENT'
+        'operator_id': receiver['id'], 'reason': '紧急催办', 'urgency': 'URGENT'
     })
 
     r = requests.post(f'{API}/reviews', json={
@@ -275,7 +319,7 @@ def main():
     })
     rvid_26c = r.json()['id']
     requests.post(f'{API}/reviews/{rvid_26c}/reminders', json={
-        'created_by': receiver['id'], 'reason': '特急催办', 'urgency': 'CRITICAL', 'is_escalated': True
+        'operator_id': receiver['id'], 'reason': '特急催办', 'urgency': 'CRITICAL', 'is_escalated': True
     })
 
     r = requests.get(f'{API}/reminders/pending', params={'operator_id': sender['id']})
@@ -314,7 +358,7 @@ def main():
     })
     rvid_27 = r.json()['id']
     rm27 = requests.post(f'{API}/reviews/{rvid_27}/reminders', json={
-        'created_by': receiver['id'], 'reason': '请尽快处理', 'urgency': 'URGENT'
+        'operator_id': receiver['id'], 'reason': '请尽快处理', 'urgency': 'URGENT'
     }).json()
     rm27_id = rm27['id']
 
@@ -345,7 +389,7 @@ def main():
     })
     rvid_28 = r.json()['id']
     rm28 = requests.post(f'{API}/reviews/{rvid_28}/reminders', json={
-        'created_by': receiver['id'],
+        'operator_id': receiver['id'],
         'reason': '紧急升级催办',
         'urgency': 'CRITICAL',
         'is_escalated': True
@@ -390,7 +434,7 @@ def main():
     })
     rvid_29 = r.json()['id']
     rm29 = requests.post(f'{API}/reviews/{rvid_29}/reminders', json={
-        'created_by': receiver['id'], 'reason': '关闭前催办', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': '关闭前催办', 'urgency': 'NORMAL'
     }).json()
     rm29_id = rm29['id']
     assert_equal(rm29['status'], 'PENDING', '关闭前催办状态为PENDING')
@@ -423,7 +467,7 @@ def main():
     })
     rvid_30 = r.json()['id']
     rm30 = requests.post(f'{API}/reviews/{rvid_30}/reminders', json={
-        'created_by': receiver['id'], 'reason': '重开前催办', 'urgency': 'URGENT'
+        'operator_id': receiver['id'], 'reason': '重开前催办', 'urgency': 'URGENT'
     }).json()
     rm30_id = rm30['id']
 
@@ -468,7 +512,7 @@ def main():
     })
     rvid_31 = r.json()['id']
     rm31 = requests.post(f'{API}/reviews/{rvid_31}/reminders', json={
-        'created_by': receiver['id'], 'reason': '请尽快处理顺序', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': '请尽快处理顺序', 'urgency': 'NORMAL'
     }).json()
     rm31_id = rm31['id']
 
@@ -515,10 +559,10 @@ def main():
     rvid_32b = r.json()['id']
 
     requests.post(f'{API}/reviews/{rvid_32a}/reminders', json={
-        'created_by': receiver['id'], 'reason': '缺页催办', 'urgency': 'URGENT', 'is_escalated': True
+        'operator_id': receiver['id'], 'reason': '缺页催办', 'urgency': 'URGENT', 'is_escalated': True
     })
     rm32b = requests.post(f'{API}/reviews/{rvid_32b}/reminders', json={
-        'created_by': receiver['id'], 'reason': '标签催办', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': '标签催办', 'urgency': 'NORMAL'
     }).json()
     requests.post(f'{API}/reminders/{rm32b["id"]}/process', json={
         'operator_id': sender['id'], 'process_note': '标签已重新打印'
@@ -643,7 +687,7 @@ def main():
     requests.post(f'{API}/reviews/{rvid_35_closed}/close', json={'operator_id': receiver['id']})
 
     r = requests.post(f'{API}/reviews/{rvid_35_closed}/reminders', json={
-        'created_by': receiver['id'], 'reason': '尝试对已关闭复核项催办', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': '尝试对已关闭复核项催办', 'urgency': 'NORMAL'
     })
     assert_equal(r.status_code, 400, '对已关闭复核项发起催办被拒绝(400)')
     assert_true('不允许发起催办' in r.json()['error'], '错误信息包含不允许催办提示')
@@ -658,7 +702,7 @@ def main():
         'operator_id': sender['id'], 'handling_note': '申请关闭', 'status': 'PENDING_CLOSE'
     })
     r = requests.post(f'{API}/reviews/{rvid_35_pc}/reminders', json={
-        'created_by': receiver['id'], 'reason': '尝试对待关闭复核项催办', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': '尝试对待关闭复核项催办', 'urgency': 'NORMAL'
     })
     assert_equal(r.status_code, 400, '对待关闭(PENDING_CLOSE)复核项发起催办被拒绝(400)')
 
@@ -669,26 +713,222 @@ def main():
     })
     rvid_35_open = r.json()['id']
     r = requests.post(f'{API}/reviews/{rvid_35_open}/reminders', json={
-        'created_by': receiver['id'], 'reason': 'OPEN状态催办', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': 'OPEN状态催办', 'urgency': 'NORMAL'
     })
     assert_true(r.status_code in (200, 201), 'OPEN状态复核项可发起催办')
+    rm35_id = r.json()['id']
+    
+    conn35_setup = sqlite3.connect(DB_PATH)
+    c35_setup = conn35_setup.cursor()
+    c35_setup.execute("UPDATE reminders SET created_at = datetime('now', '-2 minutes') WHERE id = ?", (rm35_id,))
+    conn35_setup.commit()
+    conn35_setup.close()
 
     r = requests.post(f'{API}/reviews/{rvid_35_open}/update', json={
         'operator_id': sender['id'], 'handling_note': '处理中', 'status': 'IN_PROGRESS'
     })
     r = requests.post(f'{API}/reviews/{rvid_35_open}/reminders', json={
-        'created_by': receiver['id'], 'reason': 'IN_PROGRESS状态催办', 'urgency': 'URGENT'
+        'operator_id': receiver['id'], 'reason': 'IN_PROGRESS状态催办', 'urgency': 'URGENT'
     })
     assert_true(r.status_code in (200, 201), 'IN_PROGRESS状态复核项可发起催办(合并)')
+    
+    conn35_setup2 = sqlite3.connect(DB_PATH)
+    c35_setup2 = conn35_setup2.cursor()
+    c35_setup2.execute("UPDATE reminders SET created_at = datetime('now', '-2 minutes') WHERE id = ?", (rm35_id,))
+    conn35_setup2.commit()
+    conn35_setup2.close()
 
     r = requests.post(f'{API}/reviews/{rvid_35_open}/reject', json={
         'operator_id': receiver['id'], 'reason': '测试退回状态催办'
     })
     r = requests.post(f'{API}/reviews/{rvid_35_open}/reminders', json={
-        'created_by': receiver['id'], 'reason': 'REJECTED状态催办', 'urgency': 'NORMAL'
+        'operator_id': receiver['id'], 'reason': 'REJECTED状态催办', 'urgency': 'NORMAL'
     })
     assert_true(r.status_code in (200, 201), 'REJECTED状态复核项可发起催办(合并)')
     print(f'{PASS} 35. 发起催办时复核项状态校验 - 通过')
+
+    # ============ 测试36：超期标记与统计 ============
+    header('36. 超期标记与统计')
+    bid_36, box_ids_36, _ = create_full_batch_and_sign(sender['id'], receiver['id'], 'OVD36', box_count=2)
+    
+    past_deadline = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+    future_deadline = (datetime.now() + timedelta(days=5)).strftime('%Y-%m-%d')
+    
+    r = requests.post(f'{API}/reviews', json={
+        'batch_id': bid_36, 'box_id': box_ids_36[0],
+        'operator_id': receiver['id'],
+        'issue_type': '材料缺页', 'issue_description': 'OVD36-超期测试',
+        'deadline': past_deadline
+    })
+    rvid_36_overdue = r.json()['id']
+    
+    r = requests.post(f'{API}/reviews', json={
+        'batch_id': bid_36, 'box_id': box_ids_36[1],
+        'operator_id': receiver['id'],
+        'issue_type': '标签不清', 'issue_description': 'OVD36-未超期测试',
+        'deadline': future_deadline
+    })
+    rvid_36_not_overdue = r.json()['id']
+    
+    rm36_overdue = requests.post(f'{API}/reviews/{rvid_36_overdue}/reminders', json={
+        'operator_id': receiver['id'], 'reason': '超期催办', 'urgency': 'URGENT'
+    }).json()
+    
+    rm36_not_overdue = requests.post(f'{API}/reviews/{rvid_36_not_overdue}/reminders', json={
+        'operator_id': receiver['id'], 'reason': '未超期催办', 'urgency': 'NORMAL'
+    }).json()
+    
+    batch_detail = requests.get(f'{API}/batches/{bid_36}').json()
+    reviews_36 = batch_detail['reviews']
+    
+    rv_overdue = next((r for r in reviews_36 if r['id'] == rvid_36_overdue), None)
+    assert_true(rv_overdue is not None, '找到超期复核项')
+    if rv_overdue:
+        assert_true(rv_overdue.get('is_overdue') == True, '超期复核项is_overdue=true')
+    
+    rv_not_overdue = next((r for r in reviews_36 if r['id'] == rvid_36_not_overdue), None)
+    assert_true(rv_not_overdue is not None, '找到未超期复核项')
+    if rv_not_overdue:
+        assert_true(rv_not_overdue.get('is_overdue') == False or rv_not_overdue.get('is_overdue') is None,
+                     '未超期复核项is_overdue=false')
+    
+    stats_36 = requests.get(f'{API}/reminders/stats').json()
+    assert_true('overdue_pending' in stats_36, '统计接口包含overdue_pending')
+    assert_true('escalated_pending' in stats_36, '统计接口包含escalated_pending')
+    assert_true(isinstance(stats_36['overdue_pending'], int), 'overdue_pending为整数')
+    assert_true(stats_36['overdue_pending'] >= 1, '超期待办数至少为1')
+    
+    pending_36 = requests.get(f'{API}/reminders/pending', params={'operator_id': sender['id']}).json()
+    all_items_36 = []
+    for items in pending_36.values():
+        all_items_36.extend(items)
+    
+    overdue_reminder = next((r for r in all_items_36 if r['id'] == rm36_overdue['id']), None)
+    assert_true(overdue_reminder is not None, '待办列表中找到超期催办')
+    if overdue_reminder:
+        assert_true('is_overdue' in overdue_reminder, '待办催办包含is_overdue字段')
+    
+    print(f'{PASS} 36. 超期标记与统计 - 通过')
+
+    # ============ 测试37：接口契约一致性 ============
+    header('37. 接口契约一致性')
+    bid_37, box_ids_37, _ = create_full_batch_and_sign(sender['id'], receiver['id'], 'CON37', box_count=1)
+    
+    r = requests.post(f'{API}/reviews', json={
+        'batch_id': bid_37, 'box_id': box_ids_37[0],
+        'operator_id': receiver['id'],
+        'issue_type': '材料缺页', 'issue_description': 'CON37契约一致性测试'
+    })
+    rvid_37 = r.json()['id']
+    
+    rm37 = requests.post(f'{API}/reviews/{rvid_37}/reminders', json={
+        'operator_id': receiver['id'],
+        'reason': '契约测试催办',
+        'urgency': 'CRITICAL',
+        'is_escalated': True,
+        'expected_completion': (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d')
+    }).json()
+    
+    assert_true('id' in rm37, '创建催办返回id')
+    assert_true('review_id' in rm37, '创建催办返回review_id')
+    assert_true('reason' in rm37, '创建催办返回reason')
+    assert_true('urgency' in rm37, '创建催办返回urgency')
+    assert_true('is_escalated' in rm37, '创建催办返回is_escalated')
+    assert_true('status' in rm37, '创建催办返回status')
+    assert_true('created_by' in rm37, '创建催办返回created_by')
+    assert_true('created_at' in rm37, '创建催办返回created_at')
+    
+    batch_detail_37 = requests.get(f'{API}/batches/{bid_37}').json()
+    rv37 = next((r for r in batch_detail_37['reviews'] if r['id'] == rvid_37), None)
+    assert_true(rv37 is not None, '批次详情找到复核项')
+    
+    if rv37:
+        assert_true('reminder_total' in rv37, '批次详情复核项包含reminder_total')
+        assert_true('reminder_latest_creator' in rv37, '批次详情包含reminder_latest_creator(统一命名)')
+        assert_true('reminder_latest_at' in rv37, '批次详情包含reminder_latest_at')
+        assert_true('reminder_latest_urgency' in rv37, '批次详情包含reminder_latest_urgency')
+        assert_true('reminder_latest_urgency_name' in rv37, '批次详情包含reminder_latest_urgency_name')
+        assert_true('reminder_latest_is_escalated' in rv37, '批次详情包含reminder_latest_is_escalated')
+        assert_true('reminder_latest_status' in rv37, '批次详情包含reminder_latest_status')
+        assert_true('reminder_latest_status_name' in rv37, '批次详情包含reminder_latest_status_name')
+        assert_true('reminder_by_urgency' in rv37, '批次详情包含reminder_by_urgency分档统计')
+    
+    stats_37 = requests.get(f'{API}/reminders/stats').json()
+    assert_true('by_urgency' in stats_37, '统计接口包含by_urgency嵌套结构')
+    assert_true(isinstance(stats_37['by_urgency'], dict), 'by_urgency是字典类型')
+    assert_true('NORMAL' in stats_37['by_urgency'], 'by_urgency包含NORMAL')
+    assert_true('URGENT' in stats_37['by_urgency'], 'by_urgency包含URGENT')
+    assert_true('CRITICAL' in stats_37['by_urgency'], 'by_urgency包含CRITICAL')
+    
+    print(f'{PASS} 37. 接口契约一致性 - 通过')
+
+    # ============ 测试38：重启后一致性 - 增强验证 ============
+    header('38. 重启后一致性 - 增强验证')
+    bid_38, box_ids_38, _ = create_full_batch_and_sign(sender['id'], receiver['id'], 'PERS38', box_count=1)
+    
+    r = requests.post(f'{API}/reviews', json={
+        'batch_id': bid_38, 'box_id': box_ids_38[0],
+        'operator_id': receiver['id'],
+        'issue_type': '材料缺页', 'issue_description': 'PERS38持久化测试'
+    })
+    rvid_38 = r.json()['id']
+    
+    rm38 = requests.post(f'{API}/reviews/{rvid_38}/reminders', json={
+        'operator_id': receiver['id'],
+        'reason': '持久化测试催办',
+        'urgency': 'CRITICAL',
+        'is_escalated': True
+    }).json()
+    rm38_id = rm38['id']
+    
+    requests.post(f'{API}/reminders/{rm38_id}/process', json={
+        'operator_id': sender['id'],
+        'process_note': '已处理完成'
+    })
+    
+    rm38b = requests.post(f'{API}/reviews/{rvid_38}/reminders', json={
+        'operator_id': receiver['id'],
+        'reason': '第二次催办',
+        'urgency': 'URGENT',
+        'is_escalated': False
+    }).json()
+    rm38b_id = rm38b['id']
+    
+    conn38 = sqlite3.connect(DB_PATH)
+    conn38.row_factory = sqlite3.Row
+    c38 = conn38.cursor()
+    
+    c38.execute("SELECT * FROM reminders WHERE review_id = ? ORDER BY created_at", (rvid_38,))
+    db_reminders = [dict(row) for row in c38.fetchall()]
+    assert_true(len(db_reminders) >= 2, f'数据库中至少2条催办记录(实际{len(db_reminders)})')
+    
+    first_rm = db_reminders[0]
+    assert_equal(first_rm['status'], 'PROCESSED', '第一条催办状态PROCESSED持久化')
+    assert_true(first_rm['processed_by'] is not None, 'processed_by持久化')
+    assert_true(first_rm['processed_at'] is not None, 'processed_at持久化')
+    assert_equal(first_rm['process_note'], '已处理完成', 'process_note持久化')
+    
+    second_rm = db_reminders[-1]
+    assert_equal(second_rm['status'], 'PENDING', '最新催办状态PENDING持久化')
+    assert_equal(second_rm['urgency'], 'URGENT', 'urgency持久化')
+    assert_equal(second_rm['is_escalated'], 0, 'is_escalated持久化')
+    assert_equal(second_rm['created_by'], receiver['id'], 'created_by持久化')
+    assert_true(second_rm['created_at'] is not None, 'created_at持久化')
+    
+    c38.execute("SELECT COUNT(*) FROM reminder_logs WHERE reminder_id IN (SELECT id FROM reminders WHERE review_id = ?)", (rvid_38,))
+    log_count = c38.fetchone()[0]
+    assert_true(log_count >= 2, f'催办日志至少2条(实际{log_count})')
+    
+    batch_detail_38 = requests.get(f'{API}/batches/{bid_38}').json()
+    rv38 = next((r for r in batch_detail_38['reviews'] if r['id'] == rvid_38), None)
+    assert_true(rv38 is not None, '批次详情找到复核项')
+    if rv38:
+        assert_true(rv38['reminder_total'] >= 2, '催办次数持久化正确')
+        assert_true(rv38.get('reminder_latest_creator') is not None, '最近催办人持久化正确')
+        assert_true(rv38.get('reminder_latest_status') is not None, '最近催办状态持久化正确')
+    
+    conn38.close()
+    print(f'{PASS} 38. 重启后一致性 - 增强验证 - 通过')
 
     # ============ 结果汇总 ============
     print()

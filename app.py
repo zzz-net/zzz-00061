@@ -57,6 +57,8 @@ URGENCY_LEVELS = {
 
 URGENCY_ORDER = ['NORMAL', 'URGENT', 'CRITICAL']
 
+REMINDER_MERGE_WINDOW_SECONDS = 60
+
 REMINDER_STATUS = {
     'PENDING': '待处理',
     'PROCESSED': '已处理',
@@ -206,7 +208,7 @@ def init_db():
                     FOREIGN KEY (merged_into) REFERENCES reminders(id))''')
     
     for col in ['expected_completion', 'is_escalated', 'urgency', 'status',
-                'processed_by', 'processed_at', 'process_note', 'merged_into']:
+                'processed_by', 'processed_at', 'process_note', 'merged_into', 'updated_at']:
         try:
             c.execute(f'ALTER TABLE reminders ADD COLUMN {col}')
         except sqlite3.OperationalError:
@@ -332,24 +334,59 @@ def get_batch_detail(batch_id):
                            ORDER BY r.created_at DESC''', (batch_id,)).fetchall()
     for rv in reviews:
         rv['status_name'] = REVIEW_STATUS_NAME.get(rv['status'], rv['status'])
+        if rv.get('deadline') and rv['status'] != 'CLOSED':
+            ov_result = db.execute("SELECT DATE(?) < DATE('now') as is_ov", (rv['deadline'],)).fetchone()
+            rv['is_overdue'] = 1 if ov_result and ov_result['is_ov'] else 0
+        else:
+            rv['is_overdue'] = 0
         reminder_stats = db.execute('''SELECT COUNT(*) as total,
             SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
             SUM(CASE WHEN is_escalated = 1 AND status = 'PENDING' THEN 1 ELSE 0 END) as escalated_pending,
-            SUM(CASE WHEN status = 'PROCESSED' THEN 1 ELSE 0 END) as processed
-            FROM reminders WHERE review_id = ?''', (rv['id'],)).fetchone()
+            SUM(CASE WHEN status = 'PROCESSED' THEN 1 ELSE 0 END) as processed,
+            SUM(CASE WHEN status = 'CANCELLED' THEN 1 ELSE 0 END) as cancelled
+            FROM reminders WHERE review_id = ? AND (merged_into IS NULL OR merged_into = 0)''', (rv['id'],)).fetchone()
         rv['reminder_total'] = reminder_stats['total']
         rv['reminder_pending'] = reminder_stats['pending']
         rv['reminder_escalated'] = reminder_stats['escalated_pending']
         rv['reminder_processed'] = reminder_stats['processed']
+        rv['reminder_cancelled'] = reminder_stats['cancelled']
+        
         last_reminder = db.execute('''SELECT r.*, u.username as creator_name
             FROM reminders r JOIN users u ON r.created_by = u.id
             WHERE r.review_id = ? AND r.status != 'MERGED' AND (r.merged_into IS NULL OR r.merged_into = 0)
             ORDER BY r.created_at DESC LIMIT 1''', (rv['id'],)).fetchone()
         if last_reminder:
-            rv['last_reminder_by'] = last_reminder['creator_name']
-            rv['last_reminder_at'] = last_reminder['created_at']
-            rv['last_reminder_urgency'] = last_reminder['urgency']
-            rv['last_reminder_urgency_name'] = URGENCY_LEVELS.get(last_reminder['urgency'], last_reminder['urgency'])
+            rv['reminder_latest_creator'] = last_reminder['creator_name']
+            rv['reminder_latest_at'] = last_reminder['created_at']
+            rv['reminder_latest_urgency'] = last_reminder['urgency']
+            rv['reminder_latest_urgency_name'] = URGENCY_LEVELS.get(last_reminder['urgency'], last_reminder['urgency'])
+            rv['reminder_latest_is_escalated'] = last_reminder['is_escalated']
+            rv['reminder_latest_status'] = last_reminder['status']
+            rv['reminder_latest_status_name'] = REMINDER_STATUS.get(last_reminder['status'], last_reminder['status'])
+            if last_reminder.get('process_note'):
+                rv['reminder_latest_process_note'] = last_reminder['process_note']
+            if last_reminder.get('processed_by'):
+                proc_user = db.execute('SELECT username FROM users WHERE id = ?', (last_reminder['processed_by'],)).fetchone()
+                rv['reminder_latest_processor'] = proc_user['username'] if proc_user else None
+                rv['reminder_latest_processed_at'] = last_reminder['processed_at']
+        else:
+            rv['reminder_latest_creator'] = None
+            rv['reminder_latest_at'] = None
+            rv['reminder_latest_urgency'] = None
+            rv['reminder_latest_urgency_name'] = None
+            rv['reminder_latest_is_escalated'] = 0
+            rv['reminder_latest_status'] = None
+            rv['reminder_latest_status_name'] = None
+            rv['reminder_latest_process_note'] = None
+            rv['reminder_latest_processor'] = None
+            rv['reminder_latest_processed_at'] = None
+        
+        reminder_urgency_stats = db.execute('''SELECT urgency, COUNT(*) as cnt
+            FROM reminders WHERE review_id = ? AND status = 'PENDING' AND (merged_into IS NULL OR merged_into = 0)
+            GROUP BY urgency''', (rv['id'],)).fetchall()
+        rv['reminder_by_urgency'] = {level: 0 for level in URGENCY_ORDER}
+        for row in reminder_urgency_stats:
+            rv['reminder_by_urgency'][row['urgency']] = row['cnt']
     
     review_summary = {}
     for bx in boxes:
@@ -759,8 +796,24 @@ def export_batch(batch_id):
     total_reviews = len(reviews)
     open_reviews = len([r for r in reviews if r['status'] in ('OPEN', 'IN_PROGRESS', 'PENDING_CLOSE', 'REJECTED')])
     closed_reviews = len([r for r in reviews if r['status'] == 'CLOSED'])
-    writer.writerow([f'复核项统计: 共{total_reviews}项, 待处理{open_reviews}项, 已关闭{closed_reviews}项'])
-    writer.writerow([f'催办统计: 共{total_reminders}条, 待处理{pending_reminders}条'])
+    overdue_reviews = len([r for r in reviews if r.get('deadline') and r['status'] != 'CLOSED' 
+                           and datetime.strptime(r['deadline'], '%Y-%m-%d').date() < datetime.now().date()])
+    
+    pending_reminders = len([r for r in all_reminders if r['status'] == 'PENDING'])
+    processed_reminders = len([r for r in all_reminders if r['status'] == 'PROCESSED'])
+    cancelled_reminders = len([r for r in all_reminders if r['status'] == 'CANCELLED'])
+    escalated_pending = len([r for r in all_reminders if r['status'] == 'PENDING' and r['is_escalated']])
+    critical_pending = len([r for r in all_reminders if r['status'] == 'PENDING' and r['urgency'] == 'CRITICAL'])
+    urgent_pending = len([r for r in all_reminders if r['status'] == 'PENDING' and r['urgency'] == 'URGENT'])
+    normal_pending = len([r for r in all_reminders if r['status'] == 'PENDING' and r['urgency'] == 'NORMAL'])
+    overdue_pending = len([r for r in all_reminders if r['status'] == 'PENDING' 
+                           and any(rv.get('deadline') and rv['status'] != 'CLOSED' 
+                                   and datetime.strptime(rv['deadline'], '%Y-%m-%d').date() < datetime.now().date()
+                                   for rv in reviews if rv['id'] == r['review_id'])])
+    
+    writer.writerow([f'复核项统计: 共{total_reviews}项, 待处理{open_reviews}项, 已关闭{closed_reviews}项, 超期{overdue_reviews}项'])
+    writer.writerow([f'催办统计: 共{total_reminders}条, 待处理{pending_reminders}条, 已处理{processed_reminders}条, 已取消{cancelled_reminders}条'])
+    writer.writerow([f'催办分级: 特急{critical_pending}条, 紧急{urgent_pending}条, 普通{normal_pending}条, 已升级{escalated_pending}条, 超期{overdue_pending}条'])
     
     writer.writerow([])
     writer.writerow(['档案详情'])
@@ -796,8 +849,20 @@ def export_batch(batch_id):
     if reviews:
         writer.writerow([])
         writer.writerow(['复核项明细'])
-        writer.writerow(['复核ID', '盒号', '问题类型', '问题描述', '责任方', '截止时间', '处理说明', '状态', '提报人', '提报时间', '关闭人', '关闭时间'])
+        writer.writerow(['复核ID', '盒号', '问题类型', '问题描述', '责任方', '截止时间', '是否超期', '处理说明', '状态', '催办次数', '最近催办人', '最近催办时间', '最近催办紧急程度', '提报人', '提报时间', '关闭人', '关闭时间'])
         for r in reviews:
+            is_overdue = '否'
+            if r.get('deadline') and r['status'] != 'CLOSED':
+                try:
+                    if datetime.strptime(r['deadline'], '%Y-%m-%d').date() < datetime.now().date():
+                        is_overdue = '是'
+                except:
+                    pass
+            
+            r_reminders = [rm for rm in all_reminders if rm['review_id'] == r['id']]
+            reminder_count = len(r_reminders)
+            last_reminder = max(r_reminders, key=lambda x: x['created_at']) if r_reminders else None
+            
             writer.writerow([
                 r['id'],
                 r['box_no'],
@@ -805,8 +870,13 @@ def export_batch(batch_id):
                 r['issue_description'],
                 r['responsible_party'] or '',
                 r['deadline'] or '',
+                is_overdue,
                 r['handling_note'] or '',
                 REVIEW_STATUS_NAME.get(r['status'], r['status']),
+                reminder_count,
+                last_reminder['creator_name'] if last_reminder else '',
+                last_reminder['created_at'] if last_reminder else '',
+                URGENCY_LEVELS.get(last_reminder['urgency'], last_reminder['urgency']) if last_reminder else '',
                 r['creator_name'],
                 r['created_at'],
                 r['closer_name'] or '',
@@ -915,6 +985,11 @@ def get_reviews(batch_id):
                            ORDER BY r.created_at DESC''', (batch_id,)).fetchall()
     for rv in reviews:
         rv['status_name'] = REVIEW_STATUS_NAME.get(rv['status'], rv['status'])
+        if rv.get('deadline') and rv['status'] != 'CLOSED':
+            ov_result = db.execute("SELECT DATE(?) < DATE('now') as is_ov", (rv['deadline'],)).fetchone()
+            rv['is_overdue'] = 1 if ov_result and ov_result['is_ov'] else 0
+        else:
+            rv['is_overdue'] = 0
     return jsonify(reviews)
 
 @app.route('/api/reviews', methods=['POST'])
@@ -1219,7 +1294,7 @@ def create_reminder(review_id):
     if not review:
         return jsonify({'error': '复核项不存在'}), 404
     
-    operator_id = data.get('created_by')
+    operator_id = data.get('operator_id')
     operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
     if not operator:
         return jsonify({'error': '操作员不存在'}), 404
@@ -1240,30 +1315,41 @@ def create_reminder(review_id):
     if urgency not in URGENCY_ORDER:
         urgency = 'NORMAL'
     
-    existing = db.execute('''SELECT * FROM reminders 
-                             WHERE review_id = ? AND status = 'PENDING' AND merged_into IS NULL
-                             LIMIT 1''', (review_id,)).fetchone()
+    existing_pending = db.execute('''SELECT * FROM reminders 
+                                      WHERE review_id = ? AND status = 'PENDING' AND merged_into IS NULL
+                                      ORDER BY created_at DESC LIMIT 1''', (review_id,)).fetchone()
     
-    if existing:
-        new_reason = existing['reason'] + '; ' + reason
-        new_urgency = max_urgency(existing['urgency'], urgency)
-        new_is_escalated = max(existing['is_escalated'], is_escalated)
-        new_expected = existing['expected_completion']
+    if existing_pending:
+        time_diff = db.execute("SELECT (julianday('now') - julianday(?)) * 86400 as diff",
+                               (existing_pending['created_at'],)).fetchone()['diff']
+        
+        if time_diff is not None and time_diff < REMINDER_MERGE_WINDOW_SECONDS and existing_pending['created_by'] == operator_id:
+            db.rollback() if False else None
+            return jsonify({
+                'error': f'操作太频繁，请在{REMINDER_MERGE_WINDOW_SECONDS}秒后再试，或使用已有催办记录',
+                'existing_reminder_id': existing_pending['id']
+            }), 429
+        
+        new_reason = existing_pending['reason'] + '; ' + reason
+        new_urgency = max_urgency(existing_pending['urgency'], urgency)
+        new_is_escalated = max(existing_pending['is_escalated'], is_escalated)
+        new_expected = existing_pending['expected_completion']
         if expected_completion:
             if not new_expected or expected_completion > new_expected:
                 new_expected = expected_completion
         
         db.execute('''UPDATE reminders SET reason = ?, expected_completion = ?, 
-                      urgency = ?, is_escalated = ? WHERE id = ?''',
-                   (new_reason, new_expected, new_urgency, new_is_escalated, existing['id']))
+                      urgency = ?, is_escalated = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?''',
+                   (new_reason, new_expected, new_urgency, new_is_escalated, existing_pending['id']))
         
         db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
                       VALUES (?, ?, ?, ?)''',
-                   (existing['id'], '合并催办', operator_id,
-                    f'合并催办: 原因追加"{reason}", 紧急程度升级为{new_urgency}'))
+                   (existing_pending['id'], '合并催办', operator_id,
+                    f'合并催办: 原因追加"{reason}", 紧急程度升级为{URGENCY_LEVELS.get(new_urgency, new_urgency)}'))
         
-        merged = db.execute('SELECT * FROM reminders WHERE id = ?', (existing['id'],)).fetchone()
+        merged = db.execute('SELECT * FROM reminders WHERE id = ?', (existing_pending['id'],)).fetchone()
         enrich_reminder(db, merged)
+        merged['merged'] = True
         db.commit()
         return jsonify(merged), 200
     
@@ -1322,10 +1408,12 @@ def get_pending_reminders():
         return jsonify({'error': '操作员不存在'}), 404
     
     query = '''SELECT rm.*, r.issue_type, r.issue_description, r.batch_id, r.status as review_status,
-               bx.box_no
+               r.deadline, r.responsible_party,
+               bx.box_no, b.batch_no
                FROM reminders rm
                JOIN review_items r ON rm.review_id = r.id
                JOIN boxes bx ON r.box_id = bx.id
+               JOIN batches b ON r.batch_id = b.id
                WHERE rm.status = 'PENDING' AND (rm.merged_into IS NULL OR rm.merged_into = 0)'''
     params = []
     
@@ -1342,6 +1430,12 @@ def get_pending_reminders():
     reminders = db.execute(query, params).fetchall()
     for rm in reminders:
         enrich_reminder(db, rm)
+        if rm.get('deadline') and rm.get('review_status') != 'CLOSED':
+            ov_result = db.execute("SELECT DATE(?) < DATE('now') as is_ov", (rm['deadline'],)).fetchone()
+            rm['is_overdue'] = 1 if ov_result and ov_result['is_ov'] else 0
+        else:
+            rm['is_overdue'] = 0
+        rm['review_status_name'] = REVIEW_STATUS_NAME.get(rm.get('review_status', ''), rm.get('review_status', ''))
     
     grouped = {}
     for level in ['CRITICAL', 'URGENT', 'NORMAL']:
@@ -1469,10 +1563,21 @@ def get_reminder_stats():
     processed_today = db.execute('''SELECT COUNT(*) as cnt FROM reminders 
                                     WHERE status = 'PROCESSED' AND DATE(processed_at) = DATE('now')''').fetchone()['cnt']
     
+    overdue_pending = db.execute('''SELECT COUNT(*) as cnt FROM reminders rm
+        JOIN review_items r ON rm.review_id = r.id
+        WHERE rm.status = 'PENDING' AND (rm.merged_into IS NULL OR rm.merged_into = 0)
+        AND r.status != 'CLOSED' AND r.deadline IS NOT NULL AND DATE(r.deadline) < DATE('now')
+    ''').fetchone()['cnt']
+    
+    escalated_pending = db.execute('''SELECT COUNT(*) as cnt FROM reminders 
+        WHERE status = 'PENDING' AND is_escalated = 1 AND (merged_into IS NULL OR merged_into = 0)''').fetchone()['cnt']
+    
     return jsonify({
         'total_pending': total_pending,
         'by_urgency': by_urgency,
-        'processed_today': processed_today
+        'processed_today': processed_today,
+        'overdue_pending': overdue_pending,
+        'escalated_pending': escalated_pending
     })
 
 if __name__ == '__main__':
