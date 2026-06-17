@@ -85,7 +85,8 @@ STRATEGY_ACTION = {
     'DISABLE': '停用策略',
     'ROLLBACK': '回滚策略',
     'IMPORT': '导入策略',
-    'EXPORT': '导出策略'
+    'EXPORT': '导出策略',
+    'UNDO': '撤销变更'
 }
 
 STRATEGY_PERMISSION_ROLES = ['RECEIVER']
@@ -1107,7 +1108,7 @@ def create_review():
     
     existing = db.execute('''SELECT * FROM review_items 
                             WHERE box_id = ? AND issue_type = ? AND status != 'CLOSED'
-                            ORDER BY created_at DESC LIMIT 1''',
+                            ORDER BY id DESC LIMIT 1''',
                          (box_id, issue_type)).fetchone()
     if existing and existing['issue_description'].strip() == issue_description:
         return jsonify({'error': f'该盒子下已存在相同问题（状态：{REVIEW_STATUS_NAME.get(existing["status"], existing["status"])}），请勿重复提交。如有更新请编辑现有复核项'}), 409
@@ -1398,7 +1399,7 @@ def create_reminder(review_id):
     
     existing_pending = db.execute('''SELECT * FROM reminders 
                                       WHERE review_id = ? AND status = 'PENDING' AND merged_into IS NULL
-                                      ORDER BY created_at DESC LIMIT 1''', (review_id,)).fetchone()
+                                      ORDER BY id DESC LIMIT 1''', (review_id,)).fetchone()
     
     if existing_pending:
         time_diff = db.execute("SELECT (julianday('now') - julianday(?)) * 86400 as diff",
@@ -1468,7 +1469,7 @@ def get_review_reminders(review_id):
     
     reminders = db.execute('''SELECT * FROM reminders 
                               WHERE review_id = ? AND (merged_into IS NULL OR merged_into = 0)
-                              ORDER BY created_at DESC''', (review_id,)).fetchall()
+                              ORDER BY id DESC''', (review_id,)).fetchall()
     for rm in reminders:
         enrich_reminder(db, rm)
     return jsonify(reminders)
@@ -1763,52 +1764,194 @@ def get_reviews_for_strategy(db, strategy):
     
     return db.execute(query, params).fetchall()
 
-def check_conflict_and_resolve(db, reviews, strategies):
+def check_conflict_and_resolve(db, reviews, strategies, include_match_details=True):
     results = []
     for review in reviews:
         matched_strategies = []
+        unmatched_strategies = []
+        
         for strategy in strategies:
-            if review_matches_strategy(review, strategy):
-                matched_strategies.append(strategy)
+            if include_match_details:
+                match_detail = review_matches_strategy(review, strategy, return_details=True)
+                strategy_dict = dict(strategy)
+                strategy_dict['match_details'] = match_detail
+                if match_detail['all_matched']:
+                    matched_strategies.append(strategy_dict)
+                else:
+                    unmatched_strategies.append(strategy_dict)
+            else:
+                if review_matches_strategy(review, strategy):
+                    matched_strategies.append(dict(strategy))
         
         if len(matched_strategies) == 0:
             continue
-        elif len(matched_strategies) == 1:
-            results.append({
-                'review_id': review['id'],
-                'review': dict(review),
-                'matched_strategies': [dict(s) for s in matched_strategies],
-                'conflict': False,
-                'selected_strategy': dict(matched_strategies[0]),
-                'resolution': '唯一匹配'
-            })
+        
+        sorted_matched = sorted(matched_strategies, key=lambda s: (-s['priority'], s['id']))
+        selected = sorted_matched[0]
+        
+        not_selected_high_priority = []
+        for s in strategies:
+            s_dict = dict(s)
+            if s_dict['id'] != selected['id'] and s_dict['priority'] >= selected['priority']:
+                if include_match_details:
+                    match_detail = review_matches_strategy(review, s, return_details=True)
+                    s_dict['match_details'] = match_detail
+                    if not match_detail['all_matched']:
+                        not_selected_high_priority.append({
+                            'strategy': s_dict,
+                            'reason': f"优先级({s_dict['priority']}) ≥ 选中策略优先级({selected['priority']})，但未满足触发条件: {'; '.join(match_detail['failed_reasons']) if match_detail['failed_reasons'] else '未知原因'}"
+                        })
+                else:
+                    if not review_matches_strategy(review, s):
+                        not_selected_high_priority.append({
+                            'strategy': s_dict,
+                            'reason': f"优先级({s_dict['priority']}) ≥ 选中策略优先级({selected['priority']})，但未满足触发条件"
+                        })
+        
+        conflict = len(matched_strategies) > 1
+        
+        hit_reasons = []
+        if include_match_details and selected.get('match_details'):
+            md = selected['match_details']
+            for check in md['scope_checks'] + md['trigger_checks']:
+                if check['matched']:
+                    hit_reasons.append(f"{check['condition']}: 期望值{check['expected']}, 实际值{check['actual']}，匹配成功")
+        
+        resolution_detail = ''
+        if conflict:
+            resolution_detail = f'存在{len(matched_strategies)}个匹配策略，按优先级排序: '
+            resolution_detail += ' → '.join([f'{s["name"]}(优先级={s["priority"]})' for s in sorted_matched])
         else:
-            sorted_strategies = sorted(matched_strategies, key=lambda s: (-s['priority'], s['id']))
-            selected = sorted_strategies[0]
-            results.append({
-                'review_id': review['id'],
-                'review': dict(review),
-                'matched_strategies': [dict(s) for s in matched_strategies],
-                'conflict': True,
-                'selected_strategy': dict(selected),
-                'resolution': f'冲突裁决：选择优先级最高的策略"{selected["name"]}"(优先级={selected["priority"]})'
-            })
+            resolution_detail = '唯一匹配，无冲突'
+        
+        results.append({
+            'review_id': review['id'],
+            'review': dict(review),
+            'matched_strategies': matched_strategies,
+            'unmatched_strategies': unmatched_strategies if include_match_details else [],
+            'not_selected_high_priority': not_selected_high_priority,
+            'conflict': conflict,
+            'selected_strategy': selected,
+            'hit_reasons': hit_reasons,
+            'resolution': f'冲突裁决：选择优先级最高的策略"{selected["name"]}"(优先级={selected["priority"]})' if conflict else '唯一匹配',
+            'resolution_detail': resolution_detail
+        })
     return results
 
-def review_matches_strategy(review, strategy):
+def review_matches_strategy(review, strategy, return_details=False):
     scope = strategy['scope_filter'] if isinstance(strategy['scope_filter'], dict) else json.loads(strategy['scope_filter'])
     trigger = strategy['trigger_conditions'] if isinstance(strategy['trigger_conditions'], dict) else json.loads(strategy['trigger_conditions'])
     
-    if scope.get('batch_ids') and review['batch_id'] not in scope['batch_ids']:
-        return False
-    if scope.get('box_ids') and review['box_id'] not in scope['box_ids']:
-        return False
-    if trigger.get('issue_types') and review['issue_type'] not in trigger['issue_types']:
-        return False
-    if trigger.get('statuses') and review['status'] not in trigger['statuses']:
-        return False
+    match_details = {
+        'scope_checks': [],
+        'trigger_checks': [],
+        'all_matched': True,
+        'failed_reasons': []
+    }
     
-    return True
+    if scope.get('batch_ids'):
+        matched = review['batch_id'] in scope['batch_ids']
+        match_details['scope_checks'].append({
+            'condition': 'batch_ids',
+            'expected': scope['batch_ids'],
+            'actual': review['batch_id'],
+            'matched': matched
+        })
+        if not matched:
+            match_details['all_matched'] = False
+            match_details['failed_reasons'].append(f"批次ID不在适用范围内: 期望{scope['batch_ids']}, 实际{review['batch_id']}")
+    
+    if scope.get('box_ids'):
+        matched = review['box_id'] in scope['box_ids']
+        match_details['scope_checks'].append({
+            'condition': 'box_ids',
+            'expected': scope['box_ids'],
+            'actual': review['box_id'],
+            'matched': matched
+        })
+        if not matched:
+            match_details['all_matched'] = False
+            match_details['failed_reasons'].append(f"盒子ID不在适用范围内: 期望{scope['box_ids']}, 实际{review['box_id']}")
+    
+    if trigger.get('issue_types'):
+        matched = review['issue_type'] in trigger['issue_types']
+        match_details['trigger_checks'].append({
+            'condition': 'issue_types',
+            'expected': trigger['issue_types'],
+            'actual': review['issue_type'],
+            'matched': matched
+        })
+        if not matched:
+            match_details['all_matched'] = False
+            match_details['failed_reasons'].append(f"问题类型不匹配: 期望{trigger['issue_types']}, 实际{review['issue_type']}")
+    
+    if trigger.get('statuses'):
+        matched = review['status'] in trigger['statuses']
+        match_details['trigger_checks'].append({
+            'condition': 'statuses',
+            'expected': trigger['statuses'],
+            'actual': review['status'],
+            'matched': matched
+        })
+        if not matched:
+            match_details['all_matched'] = False
+            match_details['failed_reasons'].append(f"状态不匹配: 期望{trigger['statuses']}, 实际{review['status']}")
+    
+    if trigger.get('min_hours_open') and trigger['min_hours_open'] > 0:
+        hours_open = None
+        try:
+            from datetime import datetime
+            created_at = datetime.fromisoformat(review['created_at'].replace('Z', '+00:00') if 'Z' in review['created_at'] else review['created_at'])
+            hours_open = (datetime.now() - created_at).total_seconds() / 3600
+        except Exception:
+            hours_open = 0
+        matched = hours_open >= trigger['min_hours_open']
+        match_details['trigger_checks'].append({
+            'condition': 'min_hours_open',
+            'expected': trigger['min_hours_open'],
+            'actual': round(hours_open, 2),
+            'matched': matched
+        })
+        if not matched:
+            match_details['all_matched'] = False
+            match_details['failed_reasons'].append(f"开放时长不足: 期望≥{trigger['min_hours_open']}小时, 实际{round(hours_open, 2)}小时")
+    
+    if trigger.get('is_overdue') is not None:
+        is_overdue = False
+        if review.get('deadline'):
+            try:
+                from datetime import datetime
+                deadline = datetime.fromisoformat(review['deadline'].replace('Z', '+00:00') if 'Z' in review['deadline'] else review['deadline'])
+                is_overdue = deadline < datetime.now()
+            except Exception:
+                is_overdue = False
+        matched = is_overdue == trigger['is_overdue']
+        match_details['trigger_checks'].append({
+            'condition': 'is_overdue',
+            'expected': trigger['is_overdue'],
+            'actual': is_overdue,
+            'matched': matched
+        })
+        if not matched:
+            match_details['all_matched'] = False
+            match_details['failed_reasons'].append(f"超期状态不匹配: 期望{trigger['is_overdue']}, 实际{is_overdue}")
+    
+    if trigger.get('has_pending_reminder') is not None:
+        has_pending = review.get('reminder_pending', 0) > 0
+        matched = has_pending == trigger['has_pending_reminder']
+        match_details['trigger_checks'].append({
+            'condition': 'has_pending_reminder',
+            'expected': trigger['has_pending_reminder'],
+            'actual': has_pending,
+            'matched': matched
+        })
+        if not matched:
+            match_details['all_matched'] = False
+            match_details['failed_reasons'].append(f"待处理催办状态不匹配: 期望{trigger['has_pending_reminder']}, 实际{has_pending}")
+    
+    if return_details:
+        return match_details
+    return match_details['all_matched']
 
 def calculate_escalation_level(db, strategy, review):
     applied = db.execute('''SELECT * FROM reminder_strategy_applied 
@@ -2116,7 +2259,7 @@ def rollback_strategy(strategy_id):
     
     snapshot = db.execute('''SELECT * FROM reminder_strategy_snapshots 
                              WHERE strategy_id = ? AND version = ? 
-                             ORDER BY created_at DESC LIMIT 1''',
+                             ORDER BY id DESC LIMIT 1''',
                           (strategy_id, target_version)).fetchone()
     if not snapshot:
         return jsonify({'error': f'找不到版本 {target_version} 的快照'}), 404
@@ -2256,6 +2399,12 @@ def import_strategies():
     if not import_data or not isinstance(import_data, list):
         return jsonify({'error': '导入数据格式错误，应为策略数组'}), 400
     
+    import_mode = data.get('import_mode', 'new')
+    preserve_version = data.get('preserve_version', False)
+    
+    if import_mode not in ['new', 'restore']:
+        return jsonify({'error': 'import_mode只能是new或restore'}), 400
+    
     validation_errors = []
     valid_strategies = []
     
@@ -2282,6 +2431,11 @@ def import_strategies():
         if not isinstance(s_data.get('timeout_hours', 24), (int, float)) or s_data.get('timeout_hours', 24) <= 0:
             errors.append('timeout_hours应为正整数')
         
+        if preserve_version:
+            source_version = s_data.get('version', 1)
+            if not isinstance(source_version, int) or source_version < 1:
+                errors.append('版本号必须是正整数')
+        
         existing = db.execute('SELECT * FROM reminder_strategies WHERE name = ?', (s_data['name'],)).fetchone()
         if existing:
             errors.append(f'策略名称"{s_data["name"]}"已存在')
@@ -2305,6 +2459,7 @@ def import_strategies():
         }), 400
     
     imported_ids = []
+    import_results = []
     try:
         for s_data in valid_strategies:
             trigger_conditions = json.dumps(s_data.get('trigger_conditions', {}), ensure_ascii=False)
@@ -2312,37 +2467,119 @@ def import_strategies():
             notify_targets = json.dumps(s_data.get('notify_targets', []), ensure_ascii=False)
             scope_filter = json.dumps(s_data.get('scope_filter', {}), ensure_ascii=False)
             
+            source_version = s_data.get('version', 1)
+            if preserve_version:
+                target_version = source_version
+            else:
+                target_version = 1
+            
+            source_status = s_data.get('status', 'DRAFT')
+            target_status = 'DRAFT'
+            
+            export_info = s_data.get('export_info', {})
+            original_id = export_info.get('original_id')
+            original_version = export_info.get('original_version', source_version)
+            original_is_active = export_info.get('original_is_active', False)
+            
             cursor = db.execute('''INSERT INTO reminder_strategies 
                                   (name, description, trigger_conditions, escalation_order,
                                    cooldown_minutes, timeout_hours, notify_targets, scope_filter,
                                    priority, status, version, created_by)
-                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)''',
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                                (s_data['name'], s_data.get('description', ''),
                                 trigger_conditions, escalation_order,
                                 s_data.get('cooldown_minutes', 60),
                                 s_data.get('timeout_hours', 24),
                                 notify_targets, scope_filter,
                                 s_data.get('priority', 0),
-                                s_data.get('version', 1), operator_id))
+                                target_status, target_version, operator_id))
             strategy_id = cursor.lastrowid
             imported_ids.append(strategy_id)
             
-            save_strategy_snapshot(db, strategy_id, operator_id)
-            add_strategy_log(db, strategy_id, STRATEGY_ACTION['IMPORT'], operator_id,
-                             {'imported_name': s_data['name'], 'source_version': s_data.get('version', 1)})
+            version_history = s_data.get('version_history', [])
+            if preserve_version and version_history:
+                for vh in version_history:
+                    v = vh.get('version')
+                    snapshot = vh.get('snapshot', {})
+                    if v and snapshot:
+                        try:
+                            snap_data_str = json.dumps({
+                                'name': snapshot.get('name', s_data['name']),
+                                'description': snapshot.get('description', ''),
+                                'trigger_conditions': json.dumps(snapshot.get('trigger_conditions', {}), ensure_ascii=False),
+                                'escalation_order': json.dumps(snapshot.get('escalation_order', []), ensure_ascii=False),
+                                'cooldown_minutes': snapshot.get('cooldown_minutes', 60),
+                                'timeout_hours': snapshot.get('timeout_hours', 24),
+                                'notify_targets': json.dumps(snapshot.get('notify_targets', []), ensure_ascii=False),
+                                'scope_filter': json.dumps(snapshot.get('scope_filter', {}), ensure_ascii=False),
+                                'priority': snapshot.get('priority', 0),
+                                'status': snapshot.get('status', 'DRAFT'),
+                                'version': v
+                            }, ensure_ascii=False)
+                            
+                            db.execute('''INSERT OR REPLACE INTO reminder_strategy_snapshots 
+                                          (strategy_id, snapshot_data, version, created_by, created_at)
+                                          VALUES (?, ?, ?, ?, ?)''',
+                                       (strategy_id, snap_data_str, v, operator_id, 
+                                        vh.get('created_at', datetime.now().isoformat())))
+                        except Exception:
+                            pass
+            else:
+                save_strategy_snapshot(db, strategy_id, operator_id)
+            
+            import_detail = {
+                'imported_name': s_data['name'],
+                'source_version': source_version,
+                'target_version': target_version,
+                'preserve_version': preserve_version,
+                'import_mode': import_mode,
+                'original_id': original_id,
+                'original_version': original_version,
+                'original_is_active': original_is_active,
+                'source_is_active': s_data.get('is_active', False),
+                'source_effective_version': s_data.get('effective_version'),
+                'target_status': target_status,
+                'version_note': f'导入后版本为v{target_version}，状态为{target_status}。{"保留了原始版本号" if preserve_version else "从v1开始"}。'
+            }
+            add_strategy_log(db, strategy_id, STRATEGY_ACTION['IMPORT'], operator_id, import_detail)
+            
+            import_results.append({
+                'strategy_id': strategy_id,
+                'name': s_data['name'],
+                'source_version': source_version,
+                'imported_version': target_version,
+                'preserve_version': preserve_version,
+                'original_id': original_id,
+                'original_version': original_version,
+                'original_is_active': original_is_active,
+                'is_active': False,
+                'effective_version': None,
+                'version_note': import_detail['version_note'],
+                'activation_note': '导入的策略默认为草稿状态，如需生效请手动启用'
+            })
         
         db.commit()
         
         strategies = []
-        for sid in imported_ids:
+        for idx, sid in enumerate(imported_ids):
             s = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (sid,)).fetchone()
             enrich_strategy(db, s)
             strategies.append(s)
+            import_results[idx]['strategy'] = s
+        
+        active_versions = [s['version'] for s in strategies if s['status'] == 'ACTIVE']
+        max_active_version = max(active_versions) if active_versions else None
         
         return jsonify({
             'success': True,
             'imported_count': len(imported_ids),
             'imported_ids': imported_ids,
+            'import_mode': import_mode,
+            'preserve_version': preserve_version,
+            'max_active_version': max_active_version,
+            'active_count': len(active_versions),
+            'version_semantics_note': '导入的策略默认为草稿(DRAFT)状态，版本号' + ('保留了原始版本' if preserve_version else '从v1开始') + '。只有启用(ACTIVE)的策略才是生效版本。',
+            'import_results': import_results,
             'strategies': strategies
         })
     except Exception as e:
@@ -2375,6 +2612,23 @@ def export_strategies():
     for s in strategies:
         add_strategy_log(db, s['id'], STRATEGY_ACTION['EXPORT'], operator_id, {'exported_at': datetime.now().isoformat()})
         
+        snapshots = db.execute('''SELECT version, created_at, snapshot_data 
+                                  FROM reminder_strategy_snapshots 
+                                  WHERE strategy_id = ? 
+                                  ORDER BY version''', (s['id'],)).fetchall()
+        
+        version_history = []
+        for snap in snapshots:
+            try:
+                snap_data = json.loads(snap['snapshot_data'])
+            except Exception:
+                snap_data = {}
+            version_history.append({
+                'version': snap['version'],
+                'created_at': snap['created_at'],
+                'snapshot': snap_data
+            })
+        
         export_data.append({
             'name': s['name'],
             'description': s['description'],
@@ -2387,12 +2641,20 @@ def export_strategies():
             'priority': s['priority'],
             'status': s['status'],
             'version': s['version'],
+            'is_active': s['status'] == 'ACTIVE',
+            'created_at': s['created_at'],
+            'updated_at': s['updated_at'],
+            'version_history': version_history,
+            'effective_version': s['version'] if s['status'] == 'ACTIVE' else None,
             'export_info': {
                 'exported_at': datetime.now().isoformat(),
                 'exported_by': db.execute('SELECT username FROM users WHERE id = ?', (operator_id,)).fetchone()['username'],
                 'original_id': s['id'],
                 'original_created_at': s['created_at'],
-                'original_updated_at': s['updated_at']
+                'original_updated_at': s['updated_at'],
+                'original_version': s['version'],
+                'original_status': s['status'],
+                'original_is_active': s['status'] == 'ACTIVE'
             }
         })
     
@@ -2401,13 +2663,21 @@ def export_strategies():
     operator = db.execute('SELECT username, role FROM users WHERE id = ?', (operator_id,)).fetchone()
     exported_by = f"{operator['username']} ({operator['role']})" if operator else str(operator_id)
     
+    active_versions = [s['version'] for s in strategies if s['status'] == 'ACTIVE']
+    max_active_version = max(active_versions) if active_versions else None
+    
     return jsonify({
-        'version': '1.0',
+        'version': '2.0',
         'export_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'exported_at': datetime.now().isoformat(),
         'exported_by': exported_by,
         'exported_count': len(export_data),
-        'export_version': '1.0',
+        'export_version': '2.0',
+        'max_active_version': max_active_version,
+        'active_count': len(active_versions),
+        'draft_count': len([s for s in strategies if s['status'] == 'DRAFT']),
+        'inactive_count': len([s for s in strategies if s['status'] == 'INACTIVE']),
+        'version_semantics_note': '导入时默认从v1开始，可选择导入为新版本或恢复原版本号。只有状态为ACTIVE的版本才是生效版本。',
         'strategies': export_data
     })
 
@@ -2444,6 +2714,161 @@ def get_strategy_logs():
                 pass
     return jsonify(logs)
 
+@app.route('/api/strategies/<int:strategy_id>/undo', methods=['POST'])
+def undo_last_change(strategy_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return jsonify({'error': '策略不存在'}), 404
+    
+    if strategy['status'] == 'ACTIVE':
+        return jsonify({'error': '已启用的策略不能撤销，请先停用'}), 400
+    
+    last_log = db.execute('''SELECT * FROM reminder_strategy_logs 
+                             WHERE strategy_id = ? AND action != ?
+                             ORDER BY id DESC LIMIT 1''',
+                          (strategy_id, STRATEGY_ACTION['UNDO'])).fetchone()
+    
+    if not last_log:
+        return jsonify({'error': '没有可撤销的操作'}), 400
+    
+    undoable_actions = [STRATEGY_ACTION['UPDATE'], STRATEGY_ACTION['ENABLE'], STRATEGY_ACTION['DISABLE'], STRATEGY_ACTION['ROLLBACK']]
+    if last_log['action'] not in undoable_actions:
+        return jsonify({'error': f'最近一次操作"{last_log["action"]}"不支持撤销'}), 400
+    
+    current_version = strategy['version']
+    if current_version <= 1:
+        return jsonify({'error': '当前为初始版本，无法撤销'}), 400
+    
+    target_version = current_version - 1
+    
+    snapshot = db.execute('''SELECT * FROM reminder_strategy_snapshots 
+                             WHERE strategy_id = ? AND version = ? 
+                             ORDER BY id DESC LIMIT 1''',
+                          (strategy_id, target_version)).fetchone()
+    if not snapshot:
+        return jsonify({'error': f'找不到版本 {target_version} 的快照，无法撤销'}), 404
+    
+    try:
+        snap_data = json.loads(snapshot['snapshot_data'])
+    except Exception as e:
+        return jsonify({'error': f'快照数据解析失败: {str(e)}'}), 500
+    
+    old_version = current_version
+    new_version = target_version
+    
+    db.execute('''UPDATE reminder_strategies SET
+                  name = ?, description = ?, trigger_conditions = ?, escalation_order = ?,
+                  cooldown_minutes = ?, timeout_hours = ?, notify_targets = ?, scope_filter = ?,
+                  priority = ?, status = ?, version = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''',
+               (snap_data['name'], snap_data.get('description', ''),
+                snap_data['trigger_conditions'], snap_data['escalation_order'],
+                snap_data['cooldown_minutes'], snap_data['timeout_hours'],
+                snap_data['notify_targets'], snap_data['scope_filter'],
+                snap_data['priority'], snap_data['status'],
+                new_version, operator_id, strategy_id))
+    
+    save_strategy_snapshot(db, strategy_id, operator_id)
+    add_strategy_log(db, strategy_id, STRATEGY_ACTION['UNDO'], operator_id,
+                     {'undone_action': last_log['action'], 'from_version': old_version, 'to_version': target_version})
+    
+    db.commit()
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    enrich_strategy(db, strategy)
+    return jsonify({
+        'success': True,
+        'message': f'已撤销操作"{last_log["action"]}"，版本从v{old_version}回退到v{new_version}',
+        'undone_action': last_log['action'],
+        'from_version': old_version,
+        'to_version': new_version,
+        'strategy': strategy
+    })
+
+@app.route('/api/strategies/active', methods=['GET'])
+def get_active_strategies():
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = request.args.get('operator_id', type=int)
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategies = db.execute("SELECT * FROM reminder_strategies WHERE status = 'ACTIVE' ORDER BY priority DESC, created_at DESC").fetchall()
+    for s in strategies:
+        enrich_strategy(db, s)
+    
+    return jsonify({
+        'count': len(strategies),
+        'current_effective_version': max([s['version'] for s in strategies]) if strategies else 0,
+        'strategies': strategies
+    })
+
+@app.route('/api/strategies/<int:strategy_id>/effective-version', methods=['GET'])
+def get_strategy_effective_version(strategy_id):
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = request.args.get('operator_id', type=int)
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_strategy_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    strategy = db.execute('SELECT * FROM reminder_strategies WHERE id = ?', (strategy_id,)).fetchone()
+    if not strategy:
+        return jsonify({'error': '策略不存在'}), 404
+    
+    enrich_strategy(db, strategy)
+    
+    snapshots = db.execute('''SELECT s.*, u.username as creator_name
+                              FROM reminder_strategy_snapshots s JOIN users u ON s.created_by = u.id
+                              WHERE s.strategy_id = ? ORDER BY s.created_at DESC''',
+                           (strategy_id,)).fetchall()
+    
+    version_history = []
+    for snap in snapshots:
+        try:
+            snap_data = json.loads(snap['snapshot_data'])
+        except Exception:
+            snap_data = {}
+        
+        version_history.append({
+            'version': snap['version'],
+            'snapshot_data': snap_data,
+            'created_at': snap['created_at'],
+            'creator_name': snap['creator_name'],
+            'is_effective': snap['version'] == strategy['version'] and strategy['status'] == 'ACTIVE'
+        })
+    
+    return jsonify({
+        'strategy_id': strategy_id,
+        'strategy_name': strategy['name'],
+        'current_version': strategy['version'],
+        'is_active': strategy['status'] == 'ACTIVE',
+        'effective_version': strategy['version'] if strategy['status'] == 'ACTIVE' else None,
+        'effective_version_note': '当前版本即为生效版本' if strategy['status'] == 'ACTIVE' else '策略未启用，无生效版本',
+        'version_history': version_history
+    })
+
 if __name__ == '__main__':
     init_db()
-    app.run(host='127.0.0.1', port=5000, debug=True)
+    app.run(host='127.0.0.1', port=5002, debug=True)

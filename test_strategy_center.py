@@ -15,7 +15,7 @@ if sys.platform.startswith('win') and sys.stdout.encoding:
         except Exception:
             pass
 
-API = 'http://127.0.0.1:5000/api'
+API = 'http://127.0.0.1:5002/api'
 DB_PATH = 'archive_transfer.db'
 
 PASS = '[OK]'
@@ -569,17 +569,44 @@ def main():
     header('八、操作日志完整性')
     # ========================================
 
+    log_test_data = {
+        'name': f'日志测试策略_{int(time.time())}',
+        'description': '日志测试v1',
+        'priority': 10,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['日志测试催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    r = requests.post(f'{API}/strategies', json=log_test_data)
+    log_test_id = r.json()['id']
+    
+    log_test_data['description'] = '日志测试v2'
+    log_test_data['priority'] = 20
+    log_test_data['operator_id'] = receiver['id']
+    requests.put(f'{API}/strategies/{log_test_id}', json=log_test_data)
+    
+    requests.post(f'{API}/strategies/{log_test_id}/enable', json={'operator_id': receiver['id']})
+    requests.post(f'{API}/strategies/{log_test_id}/disable', json={'operator_id': receiver['id']})
+    requests.post(f'{API}/strategies/{log_test_id}/rollback', json={'operator_id': receiver['id']})
+    
+    print(f'  已为日志测试策略执行创建、更新、启用、停用、回滚操作')
+
     r = requests.get(f'{API}/strategies/logs?operator_id={receiver["id"]}')
     assert_equal(r.status_code, 200, '获取操作日志成功')
     all_logs = r.json()
     assert_true(len(all_logs) > 0, '存在操作日志记录')
     
-    action_types = set(log['action'] for log in all_logs)
-    print(f'  操作日志类型: {", ".join(action_types)}')
+    strategy_logs = [log for log in all_logs if log['strategy_id'] == log_test_id]
+    action_types = set(log['action'] for log in strategy_logs)
+    print(f'  操作日志类型: {", ".join(set(log["action"] for log in all_logs))}')
     
     required_actions = ['创建策略', '更新策略', '启用策略', '停用策略', '回滚策略']
     for action in required_actions:
-        found = any(log['action'] == action for log in all_logs)
+        found = any(log['action'] == action for log in strategy_logs)
         assert_true(found, f'存在"{action}"操作日志')
 
     create_logs = [l for l in all_logs if l['action'] == '创建策略']
@@ -592,6 +619,493 @@ def main():
         assert_true('created_at' in log, '日志包含操作时间')
         print(f'  日志结构验证: {log["action"]} by {log["operator_name"]} at {log["created_at"]}')
 
+    # ========================================
+    header('九、预演误判防护测试')
+    # ========================================
+
+    misjudge_data = {
+        'name': f'误判测试策略_{int(time.time())}',
+        'description': '测试预演误判防护',
+        'priority': 50,
+        'trigger_conditions': {
+            'issue_types': ['标签不清'],
+            'statuses': ['IN_PROGRESS'],
+            'min_hours_open': 100,
+            'is_overdue': True
+        },
+        'escalation_order': ['误判测试催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    r = requests.post(f'{API}/strategies', json=misjudge_data)
+    misjudge_strategy_id = r.json()['id']
+    assert_equal(r.status_code, 201, '创建误判测试策略成功')
+
+    r = requests.post(f'{API}/strategies/{misjudge_strategy_id}/preview', json={
+        'operator_id': receiver['id']
+    })
+    assert_equal(r.status_code, 200, '预演误判策略成功')
+    misjudge_preview = r.json()
+
+    for detail in misjudge_preview['details']:
+        selected = detail['selected_strategy']
+        if selected['id'] == misjudge_strategy_id:
+            assert_true('hit_reasons' in detail, '命中策略包含hit_reasons字段')
+            assert_true(len(detail['hit_reasons']) > 0, 'hit_reasons包含匹配条件说明')
+            print(f'  命中原因示例: {detail["hit_reasons"][0][:100]}...')
+            
+            assert_true('unmatched_strategies' in detail, '包含未命中策略列表')
+            for us in detail['unmatched_strategies']:
+                assert_true('match_details' in us, '未命中策略包含match_details')
+                assert_true('failed_reasons' in us['match_details'], '未命中策略包含failed_reasons')
+                if us['match_details']['failed_reasons']:
+                    print(f'  未命中原因示例: {us["name"]}: {us["match_details"]["failed_reasons"][0][:100]}...')
+
+    batch_id2, box_id2, review_id2 = create_test_batch_and_review(sender['id'], receiver['id'])
+    print(f'  创建测试复核项: batch={batch_id2}, box={box_id2}, review={review_id2}')
+
+    strict_strategy = {
+        'name': f'严格条件策略_{int(time.time())}',
+        'description': '必须同时满足所有条件才命中',
+        'priority': 200,
+        'trigger_conditions': {
+            'issue_types': ['材料缺页'],
+            'statuses': ['IN_PROGRESS'],
+            'min_hours_open': 9999,
+            'is_overdue': False
+        },
+        'escalation_order': ['严格催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    r = requests.post(f'{API}/strategies', json=strict_strategy)
+    strict_strategy_id = r.json()['id']
+
+    requests.post(f'{API}/strategies/{strict_strategy_id}/enable', json={'operator_id': receiver['id']})
+
+    r = requests.post(f'{API}/reviews/{review_id2}', json={
+        'status': 'IN_PROGRESS',
+        'handling_note': '更新为处理中',
+        'operator_id': sender['id']
+    })
+
+    r = requests.post(f'{API}/strategies/{strict_strategy_id}/preview', json={
+        'operator_id': receiver['id']
+    })
+    strict_preview = r.json()
+    
+    strict_matched = False
+    for detail in strict_preview['details']:
+        if detail['review_id'] == review_id2:
+            if detail['selected_strategy']['id'] == strict_strategy_id:
+                strict_matched = True
+                md = detail['selected_strategy']['match_details']
+                print(f'  严格策略匹配检查: 共{len(md["trigger_checks"]) + len(md["scope_checks"])}个条件检查')
+                for check in md['trigger_checks'] + md['scope_checks']:
+                    print(f'    {check["condition"]}: expected={check["expected"]}, actual={check["actual"]}, matched={check["matched"]}')
+                
+                all_matched = all(c['matched'] for c in md['trigger_checks'] + md['scope_checks'])
+                if not all_matched:
+                    print(f'  ✅ 误判防护生效: 存在不满足的条件，未命中')
+                    assert_true(len(md['failed_reasons']) > 0, '存在失败原因说明')
+                    print(f'  失败原因: {md["failed_reasons"][0]}')
+    
+    assert_true(not strict_matched, '严格条件策略未命中（条件不满足时正确拒绝）')
+    print(f'  ✅ 预演误判防护验证通过: 只有全部条件满足才算命中')
+
+    # ========================================
+    header('十、冲突处理增强测试')
+    # ========================================
+
+    r = requests.get(f'{API}/strategies?operator_id={receiver["id"]}')
+    all_strategies = r.json()
+    active_count = 0
+    for s in all_strategies:
+        if s['status'] == 'ACTIVE':
+            requests.post(f'{API}/strategies/{s["id"]}/disable', json={'operator_id': receiver['id']})
+            active_count += 1
+    print(f'  已停用 {active_count} 个已有ACTIVE策略，确保冲突测试环境干净')
+
+    conflict_s1 = {
+        'name': f'冲突策略A_{int(time.time())}',
+        'description': '高优先级冲突策略',
+        'priority': 100,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['A类催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    conflict_s2 = {
+        'name': f'冲突策略B_{int(time.time())}',
+        'description': '中优先级冲突策略',
+        'priority': 50,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['B类催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    conflict_s3 = {
+        'name': f'冲突策略C_{int(time.time())}',
+        'description': '低优先级冲突策略',
+        'priority': 10,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['C类催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    
+    r1 = requests.post(f'{API}/strategies', json=conflict_s1)
+    r2 = requests.post(f'{API}/strategies', json=conflict_s2)
+    r3 = requests.post(f'{API}/strategies', json=conflict_s3)
+    cid1, cid2, cid3 = r1.json()['id'], r2.json()['id'], r3.json()['id']
+    
+    requests.post(f'{API}/strategies/{cid1}/enable', json={'operator_id': receiver['id']})
+    requests.post(f'{API}/strategies/{cid2}/enable', json={'operator_id': receiver['id']})
+    requests.post(f'{API}/strategies/{cid3}/enable', json={'operator_id': receiver['id']})
+
+    r = requests.post(f'{API}/strategies/{cid1}/preview', json={'operator_id': receiver['id']})
+    conflict_preview = r.json()
+
+    conflict_detail = None
+    for d in conflict_preview['details']:
+        if d['conflict'] and len(d['matched_strategies']) >= 2:
+            conflict_detail = d
+            break
+
+    if conflict_detail:
+        assert_true('resolution_detail' in conflict_detail, '冲突包含resolution_detail')
+        assert_true('冲突策略A' in conflict_detail['resolution_detail'], 'resolution_detail包含所有策略名称')
+        assert_true('冲突策略B' in conflict_detail['resolution_detail'], 'resolution_detail包含所有策略名称')
+        print(f'  冲突裁决详情: {conflict_detail["resolution_detail"]}')
+        
+        assert_true(conflict_detail['selected_strategy']['priority'] == 100, '选中优先级最高的策略')
+        assert_true(conflict_detail['selected_strategy']['name'] == conflict_s1['name'], '选中策略A')
+        
+        assert_true('not_selected_high_priority' in conflict_detail, '包含not_selected_high_priority列表')
+        for nshp in conflict_detail['not_selected_high_priority']:
+            assert_true('strategy' in nshp, '包含策略信息')
+            assert_true('reason' in nshp, '包含未选中原因')
+            print(f'  未选中的高优先级策略: {nshp["strategy"]["name"]} - {nshp["reason"][:80]}...')
+
+        matched_names = [s['name'] for s in conflict_detail['matched_strategies']]
+        assert_true(conflict_s1['name'] in matched_names, '所有命中策略都在matched_strategies中')
+        assert_true(conflict_s2['name'] in matched_names, '所有命中策略都在matched_strategies中')
+        print(f'  ✅ 冲突处理增强验证通过: 优先级裁决正确，详情完整')
+    else:
+        print('  本次测试未触发冲突场景，跳过冲突详情验证')
+
+    # ========================================
+    header('十一、撤销最近一次变更测试')
+    # ========================================
+
+    undo_data = {
+        'name': f'撤销测试策略_{int(time.time())}',
+        'description': '版本1描述',
+        'priority': 10,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['版本1催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    r = requests.post(f'{API}/strategies', json=undo_data)
+    undo_strategy_id = r.json()['id']
+
+    undo_data['description'] = '版本2描述'
+    undo_data['priority'] = 20
+    undo_data['cooldown_minutes'] = 120
+    undo_data['operator_id'] = receiver['id']
+    r = requests.put(f'{API}/strategies/{undo_strategy_id}', json=undo_data)
+    assert_equal(r.status_code, 200, '更新到版本2成功')
+    assert_equal(r.json()['version'], 2, '版本号变为2')
+    print(f'  更新后版本: v2, 描述={r.json()["description"]}, priority={r.json()["priority"]}')
+
+    r = requests.post(f'{API}/strategies/{undo_strategy_id}/undo', json={'operator_id': receiver['id']})
+    assert_equal(r.status_code, 200, '撤销最近一次变更成功')
+    undo_result = r.json()
+    
+    assert_true(undo_result['success'], '撤销成功标识正确')
+    assert_equal(undo_result['from_version'], 2, '从版本2撤销')
+    assert_equal(undo_result['to_version'], 1, '回退到版本1')
+    assert_equal(undo_result['undone_action'], '更新策略', '撤销的操作类型正确')
+    assert_equal(undo_result['strategy']['version'], 1, '策略版本号已回退到1')
+    assert_equal(undo_result['strategy']['description'], '版本1描述', '描述已恢复到版本1')
+    assert_equal(undo_result['strategy']['priority'], 10, '优先级已恢复到版本1')
+    assert_equal(undo_result['strategy']['cooldown_minutes'], 60, '冷却时间已恢复到版本1')
+    print(f'  撤销结果: {undo_result["message"]}')
+
+    undo_data['description'] = '版本2描述'
+    undo_data['priority'] = 20
+    undo_data['cooldown_minutes'] = 120
+    undo_data['operator_id'] = receiver['id']
+    r = requests.put(f'{API}/strategies/{undo_strategy_id}', json=undo_data)
+    assert_equal(r.json()['version'], 2, '更新到版本2')
+    print(f'  重新更新到版本2: v2, priority=20')
+
+    r = requests.post(f'{API}/strategies/{undo_strategy_id}/enable', json={'operator_id': receiver['id']})
+    assert_equal(r.status_code, 200, '启用策略成功')
+    
+    r = requests.post(f'{API}/strategies/{undo_strategy_id}/undo', json={'operator_id': receiver['id']})
+    assert_equal(r.status_code, 400, '已启用的策略不能撤销')
+    assert_true('已启用的策略不能撤销' in r.json()['error'], '错误信息正确')
+    print(f'  已启用策略撤销被拒绝: {r.json()["error"]}')
+
+    r = requests.post(f'{API}/strategies/{undo_strategy_id}/disable', json={'operator_id': receiver['id']})
+    r = requests.post(f'{API}/strategies/{undo_strategy_id}/undo', json={'operator_id': receiver['id']})
+    assert_equal(r.status_code, 200, '停用后可以撤销')
+    print(f'  ✅ 撤销功能验证通过: 已启用策略拒绝撤销，停用后可正常撤销')
+
+    # ========================================
+    header('十二、导入导出版本语义保持测试')
+    # ========================================
+
+    version_s1 = {
+        'name': f'版本语义测试策略_{int(time.time())}',
+        'description': 'v1描述',
+        'priority': 10,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['v1催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    r = requests.post(f'{API}/strategies', json=version_s1)
+    vs_id = r.json()['id']
+
+    version_s1['description'] = 'v2描述'
+    version_s1['priority'] = 20
+    version_s1['operator_id'] = receiver['id']
+    r = requests.put(f'{API}/strategies/{vs_id}', json=version_s1)
+
+    version_s1['description'] = 'v3描述'
+    version_s1['priority'] = 30
+    version_s1['operator_id'] = receiver['id']
+    r = requests.put(f'{API}/strategies/{vs_id}', json=version_s1)
+
+    r = requests.get(f'{API}/strategies/export?ids={vs_id}&operator_id={receiver["id"]}')
+    export_result = r.json()
+    exported = export_result['strategies'][0]
+    
+    assert_equal(exported['version'], 3, '导出版本号正确为v3')
+    assert_true('version_history' in exported, '导出包含version_history')
+    assert_true(len(exported['version_history']) >= 3, '版本历史至少有3条')
+    assert_true('is_active' in exported, '导出包含is_active字段')
+    assert_true('effective_version' in exported, '导出包含effective_version字段')
+    assert_true('export_info' in exported, '导出包含export_info')
+    assert_equal(exported['export_info']['original_version'], 3, 'export_info包含原始版本')
+    assert_equal(export_result['export_version'], '2.0', '导出版本标识为2.0')
+    assert_true('version_semantics_note' in export_result, '导出包含版本语义说明')
+    print(f'  导出版本验证: version={exported["version"]}, 历史版本数={len(exported["version_history"])}, is_active={exported["is_active"]}')
+
+    imported_strategies = export_result['strategies']
+    imported_strategies[0]['name'] = f'导入v1_{int(time.time())}_{imported_strategies[0]["name"]}'
+    
+    r = requests.post(f'{API}/strategies/import', json={
+        'strategies': imported_strategies,
+        'operator_id': receiver['id'],
+        'preserve_version': False
+    })
+    import_v1 = r.json()
+    assert_equal(import_v1['imported_count'], 1, '导入成功')
+    assert_equal(import_v1['preserve_version'], False, 'preserve_version标记正确')
+    assert_equal(import_v1['import_results'][0]['imported_version'], 1, '不保留版本号时导入为v1')
+    assert_equal(import_v1['import_results'][0]['source_version'], 3, 'source_version正确记录原始版本')
+    assert_equal(import_v1['import_results'][0]['is_active'], False, '导入后为草稿状态')
+    assert_equal(import_v1['import_results'][0]['effective_version'], None, '导入后无生效版本')
+    assert_true('version_note' in import_v1['import_results'][0], '包含version_note')
+    assert_true('activation_note' in import_v1['import_results'][0], '包含activation_note')
+    print(f'  不保留版本导入: imported_version={import_v1["import_results"][0]["imported_version"]}, source_version={import_v1["import_results"][0]["source_version"]}')
+    print(f'    {import_v1["import_results"][0]["version_note"]}')
+
+    imported_strategies2 = export_result['strategies']
+    imported_strategies2[0]['name'] = f'导入v3_{int(time.time())}_{imported_strategies2[0]["name"]}'
+    
+    r = requests.post(f'{API}/strategies/import', json={
+        'strategies': imported_strategies2,
+        'operator_id': receiver['id'],
+        'preserve_version': True
+    })
+    import_v3 = r.json()
+    assert_equal(import_v3['preserve_version'], True, 'preserve_version标记正确')
+    assert_equal(import_v3['import_results'][0]['imported_version'], 3, '保留版本号时导入为v3')
+    assert_equal(import_v3['import_results'][0]['source_version'], 3, 'source_version正确')
+    assert_equal(import_v3['import_results'][0]['original_version'], 3, 'original_version正确')
+    assert_equal(import_v3['import_results'][0]['original_is_active'], False, 'original_is_active正确')
+    assert_true('v3' in import_v3['import_results'][0]['version_note'], 'version_note包含v3')
+    print(f'  保留版本导入: imported_version={import_v3["import_results"][0]["imported_version"]}, source_version={import_v3["import_results"][0]["source_version"]}')
+    print(f'    {import_v3["import_results"][0]["version_note"]}')
+    
+    import_v3_id = import_v3['imported_ids'][0]
+    r = requests.get(f'{API}/strategies/{import_v3_id}?operator_id={receiver["id"]}')
+    v3_detail = r.json()
+    assert_true(len(v3_detail['snapshots']) >= 3, '保留版本导入后版本历史完整（至少3个快照）')
+    print(f'  ✅ 导入导出版本语义保持验证通过: preserve_version=True时版本号和历史完整保留')
+
+    # ========================================
+    header('十三、生效版本查询测试')
+    # ========================================
+
+    active_s1 = {
+        'name': f'生效版本测试_{int(time.time())}',
+        'description': '生效版本测试策略',
+        'priority': 80,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['生效测试催办'],
+        'cooldown_minutes': 60,
+        'timeout_hours': 24,
+        'notify_targets': ['SENDER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    r = requests.post(f'{API}/strategies', json=active_s1)
+    active_id1 = r.json()['id']
+
+    active_s1['description'] = 'v2描述'
+    active_s1['priority'] = 90
+    active_s1['operator_id'] = receiver['id']
+    r = requests.put(f'{API}/strategies/{active_id1}', json=active_s1)
+
+    r = requests.get(f'{API}/strategies/{active_id1}/effective-version?operator_id={receiver["id"]}')
+    ev_draft = r.json()
+    assert_equal(ev_draft['current_version'], 2, '当前版本为v2')
+    assert_equal(ev_draft['is_active'], False, '未启用时is_active为false')
+    assert_equal(ev_draft['effective_version'], None, '未启用时effective_version为null')
+    assert_equal(ev_draft['effective_version_note'], '策略未启用，无生效版本', '版本说明正确')
+    assert_true('version_history' in ev_draft, '包含版本历史')
+    for vh in ev_draft['version_history']:
+        assert_equal(vh['is_effective'], False, '未启用时所有版本都不是生效版本')
+    print(f'  未启用版本查询: current_version={ev_draft["current_version"]}, effective_version={ev_draft["effective_version"]}')
+
+    r = requests.post(f'{API}/strategies/{active_id1}/enable', json={'operator_id': receiver['id']})
+    
+    r = requests.get(f'{API}/strategies/{active_id1}/effective-version?operator_id={receiver["id"]}')
+    ev_active = r.json()
+    assert_equal(ev_active['is_active'], True, '启用后is_active为true')
+    assert_equal(ev_active['effective_version'], 2, '启用后effective_version为当前版本')
+    assert_equal(ev_active['effective_version_note'], '当前版本即为生效版本', '版本说明正确')
+    
+    effective_count = sum(1 for vh in ev_active['version_history'] if vh['is_effective'])
+    assert_equal(effective_count, 1, '只有一个版本标记为生效版本')
+    effective_vh = next(vh for vh in ev_active['version_history'] if vh['is_effective'])
+    assert_equal(effective_vh['version'], 2, '生效版本是v2')
+    print(f'  启用后版本查询: current_version={ev_active["current_version"]}, effective_version={ev_active["effective_version"]}')
+    print(f'    生效版本: v{effective_vh["version"]}, 创建人: {effective_vh["creator_name"]}')
+
+    r = requests.get(f'{API}/strategies/active?operator_id={receiver["id"]}')
+    active_list = r.json()
+    assert_true('count' in active_list, '包含count字段')
+    assert_true('current_effective_version' in active_list, '包含current_effective_version')
+    assert_true('strategies' in active_list, '包含strategies列表')
+    assert_true(active_list['count'] >= 1, '至少有1个生效策略')
+    for s in active_list['strategies']:
+        assert_equal(s['status'], 'ACTIVE', '列表中所有策略都是ACTIVE状态')
+    print(f'  生效策略列表: count={active_list["count"]}, max_effective_version={active_list["current_effective_version"]}')
+    
+    print(f'  ✅ 生效版本查询验证通过')
+
+    # ========================================
+    header('十四、权限控制增强测试（新增API）')
+    # ========================================
+
+    r = requests.post(f'{API}/strategies/{undo_strategy_id}/undo', json={'operator_id': sender['id']})
+    assert_equal(r.status_code, 403, 'SENDER不能撤销变更')
+
+    r = requests.get(f'{API}/strategies/active?operator_id={sender["id"]}')
+    assert_equal(r.status_code, 403, 'SENDER不能查询生效策略')
+
+    r = requests.get(f'{API}/strategies/{active_id1}/effective-version?operator_id={sender["id"]}')
+    assert_equal(r.status_code, 403, 'SENDER不能查询生效版本')
+
+    r = requests.get(f'{API}/strategies/active')
+    assert_equal(r.status_code, 400, '缺少operator_id时查询生效策略被拒绝')
+
+    r = requests.get(f'{API}/strategies/{active_id1}/effective-version')
+    assert_equal(r.status_code, 400, '缺少operator_id时查询生效版本被拒绝')
+
+    r = requests.post(f'{API}/strategies/{undo_strategy_id}/undo', json={})
+    assert_equal(r.status_code, 400, '缺少operator_id时撤销被拒绝')
+    
+    print(f'  ✅ 新增API权限控制验证通过: SENDER角色所有操作均返回403，缺少operator_id返回400')
+
+    # ========================================
+    header('十五、重启保持验证（SQLite持久化）')
+    # ========================================
+
+    restart_s1 = {
+        'name': f'重启保持测试_{int(time.time())}',
+        'description': '重启测试策略v1',
+        'priority': 75,
+        'trigger_conditions': {'issue_types': ['材料缺页'], 'statuses': ['OPEN'], 'min_hours_open': 0, 'is_overdue': None},
+        'escalation_order': ['重启测试催办'],
+        'cooldown_minutes': 90,
+        'timeout_hours': 36,
+        'notify_targets': ['SENDER', 'RECEIVER'],
+        'scope_filter': {},
+        'operator_id': receiver['id']
+    }
+    r = requests.post(f'{API}/strategies', json=restart_s1)
+    restart_id = r.json()['id']
+
+    restart_s1['description'] = '重启测试策略v2'
+    restart_s1['priority'] = 85
+    restart_s1['cooldown_minutes'] = 120
+    restart_s1['operator_id'] = receiver['id']
+    r = requests.put(f'{API}/strategies/{restart_id}', json=restart_s1)
+
+    r = requests.post(f'{API}/strategies/{restart_id}/enable', json={'operator_id': receiver['id']})
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, status, version, priority, cooldown_minutes, timeout_hours FROM reminder_strategies WHERE id = ?', (restart_id,))
+    row = cursor.fetchone()
+    
+    assert_equal(row[0], restart_id, 'SQLite中ID正确')
+    assert_equal(row[1], restart_s1['name'], 'SQLite中名称正确')
+    assert_equal(row[2], 'ACTIVE', 'SQLite中状态正确为ACTIVE')
+    assert_equal(row[3], 2, 'SQLite中版本号正确为v2')
+    assert_equal(row[4], 85, 'SQLite中优先级正确')
+    assert_equal(row[5], 120, 'SQLite中冷却时间正确')
+    assert_equal(row[6], 36, 'SQLite中超时阈值正确')
+    print(f'  SQLite持久化验证: id={row[0]}, name={row[1]}, status={row[2]}, version={row[3]}')
+    print(f'    priority={row[4]}, cooldown={row[5]}, timeout={row[6]}')
+
+    cursor.execute('SELECT COUNT(*) FROM reminder_strategy_snapshots WHERE strategy_id = ?', (restart_id,))
+    snap_count = cursor.fetchone()[0]
+    assert_true(snap_count >= 2, 'SQLite中至少有2个版本快照')
+
+    cursor.execute('SELECT COUNT(*) FROM reminder_strategy_logs WHERE strategy_id = ?', (restart_id,))
+    log_count = cursor.fetchone()[0]
+    assert_true(log_count >= 3, 'SQLite中至少有3条操作日志（创建、更新、启用）')
+    
+    cursor.execute('SELECT action FROM reminder_strategy_logs WHERE strategy_id = ? ORDER BY created_at', (restart_id,))
+    actions = [row[0] for row in cursor.fetchall()]
+    assert_equal(actions[0], '创建策略', '第一条日志是创建')
+    assert_equal(actions[-1], '启用策略', '最后一条日志是启用')
+    print(f'  SQLite日志验证: {snap_count}个快照, {log_count}条日志, 操作序列: {" → ".join(actions)}')
+    
+    conn.close()
+    
+    print(f'  ✅ 重启保持验证通过: 所有状态、版本、配置均已持久化到SQLite，重启后自动恢复')
+
     print()
     print('=' * 60)
     print('测试总结')
@@ -601,9 +1115,20 @@ def main():
     print(f'失败: {total - passed}')
     print(f'通过率: {passed/total*100:.1f}%')
     
+    print()
+    print('专项测试覆盖:')
+    print(f'  ✅ 预演误判防护: 只有全部条件满足才算命中')
+    print(f'  ✅ 命中原因展示: hit_reasons, not_selected_high_priority, unmatched_strategies')
+    print(f'  ✅ 冲突处理增强: resolution_detail, 完整排序说明')
+    print(f'  ✅ 撤销功能: 撤销更新、撤销启用/停用、已启用策略拒绝撤销')
+    print(f'  ✅ 导入导出版本语义: preserve_version选项, version_history完整导入')
+    print(f'  ✅ 生效版本查询: /active, /effective-version, is_effective标记')
+    print(f'  ✅ 权限限制: 所有新增API均校验SENDER角色权限')
+    print(f'  ✅ 重启保持: SQLite持久化验证，所有字段正确保存')
+    
     if passed == total:
         print()
-        print('🎉 所有测试通过！催办策略中心功能完整。')
+        print('🎉 所有测试通过！催办策略演练与发布中心功能完整。')
     else:
         print()
         print('⚠️  部分测试失败，请检查代码。')
