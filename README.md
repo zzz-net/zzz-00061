@@ -1305,19 +1305,55 @@ python test_strategy_center.py
 | 测试场景 | 验证目的 | 关键断言 |
 |---------|---------|---------|
 | **端口变更后入口仍可用** | 端口修改后入口URL自动更新 | 1. 修改端口后入口URL包含新端口；2. 恢复端口后URL恢复 |
-| **缺少操作人时的前置拦截** | 缺操作人/SENDER角色被拦截 | 1. operator_id=None返回403；2. SENDER角色返回403 |
+| **缺少操作人时的前置拦截** | 缺操作人/SENDER角色被拦截 | 1. operator_id=None返回400；2. SENDER角色返回403 |
 | **重启保持** | 配置写入SQLite持久化 | 1. 4张表存在；2. 数据正确；3. 快照和日志完整 |
 | **导入后配置一致** | 导入的配置数据与源一致 | 1. 主机地址一致；2. 端口一致 |
 | **冲突处理** | 同名配置导入冲突处理 | 1. 返回409；2. SAVE_AS_NEW后原配置保留；3. 新配置存在 |
+| **导出操作人稳定（专项新增）** | 无论哪种导出路径，操作人一致 | 1. 传operator_id：exported_by与传入一致；2. 传connection_config_id：exported_by等于配置的current_operator_id；3. 连续3次结果不漂移；4. operator_source字段正确标识来源 |
+| **切换后立即导出（专项新增）** | 切换操作人落库并提交新值 | 1. switch-operator返回current_operator_id=新值；2. 数据库current_operator_id已更新；3. 后续导出exported_by=新操作人；4. 配置版本号+1 |
+| **缺参拦截（专项新增）** | 所有必填参数缺失都被拦截 | 1. POST导出无operator_id/connection_config_id：400；2. operator_id不存在：400；3. connection_config_id不存在：400；4. 错误消息包含具体参数名 |
+| **重启恢复（专项新增）** | 重启后上下文精确还原 | 1. GET /context source=last_saved；2. current_operator_id == 保存值；3. selected_batch_id == 保存批次；4. restored_from_audit=True |
+| **关键日志审计（专项新增）** | 所有关键操作留痕可追溯 | 1. audit_logs 存在 EXPORT_BATCH、SWITCH_OPERATOR、SAVE_CONTEXT 三类记录；2. detail JSON包含操作人来源/版本变更等信息；3. connection_logs 切换记录完整 |
 
 **运行测试：**
 ```bash
 # 确保服务已启动
 python app.py
 
-# 新开终端运行测试
+# 新开终端运行连接中心专项
 python test_connection_center.py
+
+# 统一操作人模型专项测试（核心重构验证，必跑）
+python test_unified_operator.py
+
+# 主流程全链路测试
+python test_system_v2.py
 ```
+
+---
+
+### 真实请求/响应验证清单（不能只看进程在）
+
+> ⚠️ **验收标准**：仅"进程没退出"不算验证通过。必须用**真实 HTTP 请求/响应**或**真实界面操作+浏览器Console**确认以下 8 项全部通过。
+
+| 编号 | 验证项 | 操作方法 | 通过标准 |
+|-----|--------|---------|---------|
+| ✅1 | **导出档案 - 直接传操作人** | `POST /api/batches/<id>/export` body=`{"operator_id":1}` | status=200；`data.exported_by==1`；`data.exported_by_name=="sender"`；`data.operator_source=="direct_operator"` |
+| ✅2 | **导出档案 - 通过连接配置取操作人** | 先切换配置 current_operator_id=2(receiver)，再 `POST /api/batches/<id>/export` body=`{"connection_config_id":1}` | status=200；`data.exported_by==2`；`data.exported_by_name=="receiver"`；`data.operator_source=="connection_config"` |
+| ✅3 | **缺参拦截 - 无操作人导出** | `POST /api/batches/<任何存在的id>/export` body=`{}` | status=400；错误消息包含"必须提供 operator_id 或 connection_config_id" |
+| ✅4 | **缺参拦截 - 不存在的用户ID** | `POST /api/batches/<id>/export` body=`{"operator_id":999999}` | status=400；错误消息包含"operator_id=999999 对应的用户不存在" |
+| ✅5 | **切换操作人 - 落库并返回新值** | `POST /api/connection/configs/1/switch-operator` body=`{"operator_id":2,"updated_by":1}` | status=200；`data.current_operator_id==2`；`data.version_change.to == data.version_change.from+1`；后续 GET 配置详情 `current_operator_id==2` |
+| ✅6 | **切换后立即导出 = 新操作人** | 完成第5项后立刻执行第2项 | 导出 `data.exported_by==2`（不是旧值） |
+| ✅7 | **上下文保存 + 重启恢复** | 1) `POST /api/context` body=`{"operator_id":2,"selected_batch_id":<id>,"connection_config_id":1}` → 200；2) 再 `GET /api/context` | GET返回 `source=="last_saved"`；`restored_from_audit==true`；`current_operator_id==2`；`selected_batch_id==<保存的id>` |
+| ✅8 | **连续3次导出操作人稳定** | 同一操作人连续导出3次 | 每次 `exported_by` 完全相同；`operator_source` 完全相同；无漂移 |
+
+**真实界面验证（浏览器 Console + Network）**：
+1. 打开 DevTools → Console，刷新页面应看到：
+   - `[restoreContext] from /api/context: {current_operator_id: ...}`
+   - 每个请求前打印 `[apiRequest] POST/GET ...`，请求后打印状态码和响应
+2. 顶部用户下拉切换为 receiver → 连接中心配置详情页 **current_operator_id 已同步更新为 receiver**，无需手动在连接中心再切一次
+3. 点"📥 导出移交清单" → alert 弹窗显示 ✅ 并注明操作人名称和来源（`连接配置操作人` 或 `当前操作人`）
+4. `audit_logs` 表中存在本次导出记录，`detail.source` 与 alert 中显示的来源一致
 
 ---
 
@@ -1329,7 +1365,7 @@ python test_connection_center.py
 ├── README.md                  # 操作说明（本文档）
 ├── archive_transfer.db        # SQLite 数据库（运行后自动创建）
 ├── static/
-│   └── index.html         # 前端界面（含策略中心+连接与诊断中心UI）
+│   └── index.html         # 前端界面（含策略中心+连接与诊断中心UI，统一数据模型重构版）
 ├── test_system.py             # 基础功能测试
 ├── test_system_v2.py          # 签收后退回链路专项测试
 ├── test_export_download.py    # 导出记录串批次回归测试
@@ -1337,5 +1373,6 @@ python test_connection_center.py
 ├── test_encoding_stability.py # Windows控制台编码测试
 ├── test_reminder_v4.py        # 催办与升级测试
 ├── test_strategy_center.py    # 催办策略中心测试
-└── test_connection_center.py  # 连接与诊断中心测试（新增）
+├── test_connection_center.py  # 连接与诊断中心测试（16大模块 94项断言）
+└── test_unified_operator.py   # 统一数据模型专项测试（43项断言，核心重构必跑）
 ```
