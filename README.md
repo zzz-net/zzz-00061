@@ -1003,20 +1003,34 @@ v2: 恢复到冷却时间120分钟（版本号回到v2）
 
 ---
 
-### 回归测试覆盖
+### 回归测试覆盖（增强版）
 
-`test_strategy_center.py` 包含 **8大测试模块，60+项断言**，完整覆盖：
+`test_strategy_center.py` 包含 **12大测试模块，100+项断言**，完整覆盖：
 
 | 测试模块 | 覆盖场景 | 关键验证点 |
 |---------|---------|-----------|
 | **一、策略创建与基本CRUD** | 新建、查询、更新 | 字段正确性、状态默认值、版本号递增 |
-| **二、策略预演功能** | 已保存策略预演、草稿预演 | 预演结果完整性、命中明细正确性 |
-| **三、策略冲突处理** | 多策略冲突场景 | 优先级裁决正确性、冲突明细完整性 |
-| **四、权限控制测试** | SENDER角色越权操作 | 8种操作全部返回403/401 |
-| **五、策略启用与重启保持** | 启用、停用、SQLite持久化 | 状态转换、数据库持久化验证 |
-| **六、版本历史与回滚** | 多版本演进、回滚 | 快照保存、版本号管理、回滚准确性 |
-| **七、导入导出功能** | 导出、导入、重复检测、格式校验 | 数据完整性、校验逻辑正确性 |
-| **八、操作日志完整性** | 全量操作审计 | 日志类型完整性、字段完整性 |
+| **二、策略预演功能（增强）** | 已保存策略预演、草稿预演 | 预演结果完整性、命中明细正确性 |
+| **✅ 三、预演误判防护** | 条件不满足时不命中 | 只有全部触发条件满足才算命中；每个条件检查返回期望值vs实际值对比 |
+| **✅ 四、预演命中原因展示** | 命中原因、未命中原因、高优先级未选中原因 | `hit_reasons` 包含所有匹配条件；`not_selected_high_priority` 列出优先级更高但未命中的策略及原因；`unmatched_strategies` 包含所有未命中策略的失败原因 |
+| **✅ 五、冲突处理增强** | 多策略冲突场景 | 优先级裁决正确性、`resolution_detail` 包含完整排序、`matched_strategies` 包含所有命中策略的匹配详情 |
+| **六、权限控制测试** | SENDER角色越权操作 | 所有操作全部返回403/401 |
+| **七、策略启用与重启保持** | 启用、停用、SQLite持久化 | 状态转换、数据库持久化验证、重启后状态保持 |
+| **八、版本历史与回滚** | 多版本演进、回滚 | 快照保存、版本号管理、回滚准确性 |
+| **✅ 九、撤销最近一次变更** | 撤销更新、撤销启用、撤销停用、撤销回滚 | 版本号回退、配置恢复、操作记录、已启用策略不能撤销 |
+| **✅ 十、导入导出版本语义保持** | 导出版本信息、导入保留版本号、导入版本历史 | `preserve_version: true` 时版本号保持一致；`version_history` 完整导入；导入返回 `source_version`、`imported_version`、`version_note` 等语义信息 |
+| **✅ 十一、生效版本查询** | `/api/strategies/active`、`/api/strategies/<id>/effective-version` | `is_active`、`effective_version`、`version_history.is_effective` 标记正确；只有ACTIVE状态才算生效 |
+| **十二、操作日志完整性** | 全量操作审计 | 日志类型完整性、字段完整性（含UNDO操作） |
+
+#### 专项回归测试覆盖（必测场景）
+
+| 测试场景 | 验证目的 | 关键断言 |
+|---------|---------|---------|
+| **预演误判测试** | 防止因条件配置错误导致误命中 | 1. 缺少任一触发条件都不命中；2. 命中原因逐条列出每个条件的匹配结果；3. 未命中原因明确指出失败的条件 |
+| **冲突处理测试** | 多策略命中时裁决正确 | 1. 优先级最高的策略被选中；2. 所有命中策略都在 `matched_strategies` 中；3. `resolution_detail` 包含完整排序说明 |
+| **导入后版本一致** | 导入导出的版本语义不丢失 | 1. `preserve_version: true` 时导入版本 = 导出版本；2. `version_history` 完整恢复；3. `source_version`、`original_version` 等元数据完整 |
+| **重启保持测试** | 重启后状态和版本不丢失 | 1. 直接查询SQLite验证状态=ACTIVE；2. 重启后API查询状态一致；3. 版本号、配置完整保持 |
+| **权限限制测试** | 越权操作被拒绝 | 1. SENDER角色所有策略操作返回403；2. 缺少operator_id返回400；3. 不存在的operator_id返回403 |
 
 **运行测试：**
 ```bash
@@ -1045,4 +1059,281 @@ python test_strategy_center.py
 ├── test_encoding_stability.py # Windows控制台编码测试
 ├── test_reminder_v4.py        # 催办与升级测试
 └── test_strategy_center.py    # 催办策略中心测试（新增）
+```
+
+---
+
+## 失败链路6：连接与诊断中心
+
+### 核心设计理念
+
+连接与诊断中心为桌面端提供统一的**服务连接管理**和**诊断排障**能力。用户可在此维护服务地址、端口、浏览器入口和操作人信息，一键探测本地服务、自动打开正确入口、切换操作人后继续访问策略列表和版本详情；连不上或上下文不完整时给出明确原因、补齐指引和可执行恢复操作；配置写入SQLite持久化层，重启后保持一致；支持导入导出连接信息，冲突时由用户选择覆盖/保留/另存。
+
+### 数据模型
+
+#### 连接配置 (connection_configs)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| profile_name | TEXT | 配置名称（唯一） |
+| service_host | TEXT | 服务主机地址，默认127.0.0.1 |
+| service_port | INTEGER | 服务端口，默认5002 |
+| entry_path | TEXT | 浏览器入口路径，默认/ |
+| protocol | TEXT | 协议，默认http |
+| current_operator_id | INTEGER | 当前操作人ID（关联users表） |
+| is_default | INTEGER | 是否默认配置 |
+| is_published | INTEGER | 是否已发布 |
+| published_by | INTEGER | 发布人 |
+| published_at | TIMESTAMP | 发布时间 |
+| last_probe_status | TEXT | 最近探测状态（UNKNOWN/AVAILABLE/UNAVAILABLE/TIMEOUT/ERROR） |
+| last_probe_at | TIMESTAMP | 最近探测时间 |
+| last_probe_message | TEXT | 最近探测消息 |
+| last_available_at | TIMESTAMP | 最近一次可用时间 |
+| config_version | INTEGER | 配置版本号，默认1 |
+| created_by | INTEGER | 创建人 |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_by | INTEGER | 更新人 |
+| updated_at | TIMESTAMP | 更新时间 |
+
+#### 版本快照 (connection_config_snapshots)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| config_id | INTEGER | 关联配置ID |
+| snapshot_data | TEXT | 快照数据（JSON） |
+| version | INTEGER | 版本号 |
+| created_by | INTEGER | 创建人 |
+| created_at | TIMESTAMP | 创建时间 |
+
+#### 操作日志 (connection_logs)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| config_id | INTEGER | 关联配置ID |
+| profile_name | TEXT | 配置名称 |
+| action | TEXT | 操作类型 |
+| operator_id | INTEGER | 操作人ID |
+| operator_name | TEXT | 操作人名称 |
+| detail | TEXT | 详情 |
+| created_at | TIMESTAMP | 创建时间 |
+
+#### 诊断记录 (connection_diagnostics)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| config_id | INTEGER | 关联配置ID |
+| host | TEXT | 诊断主机 |
+| port | INTEGER | 诊断端口 |
+| diagnostic_type | TEXT | 诊断类型（PORT_CONNECTIVITY/HOST_RESOLUTION/PORT_VALIDATION/API_RESPONSE） |
+| status | TEXT | 诊断结果（PASS/FAIL） |
+| message | TEXT | 诊断消息 |
+| suggestion | TEXT | 修复建议 |
+| recovery_action | TEXT | 可执行的恢复操作 |
+| created_at | TIMESTAMP | 创建时间 |
+
+### 操作权限
+
+| 操作 | RECEIVER | SENDER |
+|------|----------|--------|
+| 查看/创建/编辑/删除连接配置 | ✅ | ✅ |
+| 探测连接/打开入口 | ✅ | ✅ |
+| 切换操作人 | ✅ | ✅ |
+| 发布配置 | ✅ | ❌ |
+| 导入/导出配置 | ✅ | ✅ |
+| 回退版本 | ✅ | ✅ |
+| 策略访问检查 | ✅ | ❌（仅RECEIVER角色通过） |
+
+### 操作指南
+
+#### 配置列表页面
+
+点击顶部"🔌 连接与诊断中心"Tab，显示所有连接配置。每条配置卡片展示：
+- 配置名称、连接状态标签（✅可用/❌不可用/⏱️超时/⚠️错误/❓未探测）
+- 是否默认、是否已发布、当前版本号
+- 服务地址、端口、协议、入口路径、当前操作人、入口URL、探测消息
+- 操作按钮：详情、探测、打开入口、编辑、发布（仅RECEIVER且未发布时显示）、删除
+
+#### 新建/编辑配置
+
+1. 点击"+ 新建配置"或列表中的"✏️ 编辑"按钮
+2. 填写配置名称（必填）、协议、服务地址（必填）、服务端口（必填）、入口路径、操作人
+3. 可勾选"设为默认配置"
+4. 底部实时预览入口URL
+5. 点击"创建配置"或"保存修改"
+
+#### 一键探测
+
+1. 在配置列表或详情页点击"🔍 探测"
+2. 系统自动执行4项诊断检测：
+   - **端口连通性**：socket连接测试
+   - **主机解析**：DNS/hosts解析验证
+   - **端口有效性**：端口范围1-65535验证
+   - **API响应检测**：HTTP请求/api/users验证
+3. 每项检测结果包含状态（PASS/FAIL）、消息、修复建议和可执行恢复操作
+4. 如上下文不完整（缺操作人、最近探测失败等），返回明确的警告和补齐指引
+
+#### 打开入口
+
+1. 点击"🌐 打开入口"按钮
+2. 系统先获取入口URL并检查上下文完整性
+3. 如存在警告（缺操作人、探测失败），弹窗提示是否继续
+4. 确认后自动在新标签页打开入口URL
+
+#### 切换操作人
+
+1. 在配置详情页的"👤 操作人管理"区域
+2. 从下拉列表选择新操作人
+3. 点击"🔄 切换操作人"
+4. 切换后配置版本自动+1，并保存版本快照
+
+#### 策略访问前置检查
+
+1. 点击"🔐 策略访问前置检查"
+2. 系统校验当前操作人是否设置、角色是否为RECEIVER
+3. 缺少操作人→返回403+提示"请先设置操作人"
+4. SENDER角色→返回403+提示"策略访问仅限RECEIVER角色"
+5. 检查结果在详情页显示，包含建议操作
+
+#### 配置发布
+
+1. RECEIVER角色可点击"📢 发布"按钮
+2. 发布后配置标记为已发布，记录发布人和发布时间
+3. SENDER角色无发布权限
+
+#### 版本管理与回退
+
+1. 配置详情页的"版本历史"Tab展示所有版本快照
+2. 每个版本显示：版本号、创建人、创建时间
+3. 可点击"👁️ 查看内容"展开快照数据
+4. 可点击"↩️ 回退到此版本"回退（当前版本不可回退）
+5. 详情页快捷"↩️ 回退版本"按钮回退到上一版本
+
+#### 导入配置
+
+1. 切换到"📥 导入配置"视图
+2. 粘贴导出的JSON数据
+3. 点击"开始导入"
+4. 如无冲突→直接导入成功
+5. 如有冲突（同名配置）→显示冲突对比界面：
+   - 🟥 覆盖本地：用导入版本替换本地配置
+   - 🟩 保留本地：忽略导入版本，保留本地配置
+   - 🟧 另存为新配置：以新名称保存导入版本
+6. 为所有冲突选择处理方式后，点击"✅ 确认并完成导入"
+
+#### 导出配置
+
+1. 切换到"📤 导出配置"视图
+2. 勾选要导出的配置（不选则导出全部）
+3. 点击"生成导出数据"
+4. 复制生成的JSON数据
+
+#### 操作日志
+
+1. 切换到"📋 操作日志"视图
+2. 显示所有连接中心的操作日志，包含操作类型、配置名称、操作人、详情和时间
+
+### API接口一览
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/connection/configs` | 获取配置列表 |
+| POST | `/api/connection/configs` | 创建新配置 |
+| GET | `/api/connection/configs/<id>` | 获取配置详情（含快照/日志/诊断/上下文警告） |
+| PUT | `/api/connection/configs/<id>` | 更新配置（版本+1，自动保存快照） |
+| DELETE | `/api/connection/configs/<id>` | 删除配置 |
+| GET | `/api/connection/configs/default` | 获取默认配置 |
+| POST | `/api/connection/configs/<id>/probe` | 一键探测（含4项诊断+上下文缺口分析） |
+| GET | `/api/connection/configs/<id>/entry-url` | 获取入口URL和上下文警告 |
+| POST | `/api/connection/configs/<id>/switch-operator` | 切换操作人（版本+1） |
+| POST | `/api/connection/configs/<id>/rollback` | 回退到指定版本 |
+| POST | `/api/connection/configs/<id>/publish` | 发布配置（仅RECEIVER） |
+| GET | `/api/connection/export` | 导出配置（含版本历史） |
+| POST | `/api/connection/import` | 导入配置（校验+冲突检测） |
+| POST | `/api/connection/import/resolve` | 解决冲突（覆盖/保留/另存） |
+| GET | `/api/connection/logs` | 获取操作日志 |
+| POST | `/api/connection/check-strategy-access` | 策略访问前置检查 |
+
+### 连接状态说明
+
+| 状态 | 含义 | 标签 |
+|------|------|------|
+| UNKNOWN | 未探测 | ❓ 未探测 |
+| AVAILABLE | 连接可用 | ✅ 可用 |
+| UNAVAILABLE | 连接不可用 | ❌ 不可用 |
+| TIMEOUT | 连接超时 | ⏱️ 超时 |
+| ERROR | 连接错误 | ⚠️ 错误 |
+
+### 冲突解决方式
+
+| 方式 | 说明 |
+|------|------|
+| OVERWRITE | 覆盖本地：导入版本替换本地配置 |
+| KEEP_LOCAL | 保留本地：忽略导入版本 |
+| SAVE_AS_NEW | 另存为新配置：以新名称保存导入版本 |
+
+### 回归测试覆盖
+
+`test_connection_center.py` 包含 **16大测试模块**，完整覆盖：
+
+| 测试模块 | 覆盖场景 | 关键验证点 |
+|---------|---------|-----------|
+| 一、连接配置创建与基本CRUD | 新建、查询、详情 | 字段正确性、创建/获取/列表 |
+| 二、端口变更后入口URL仍可用 | 修改端口、获取入口URL | 入口URL自动包含新端口 |
+| 三、连接探测与诊断 | 一键探测、诊断结果 | 探测状态更新、4项诊断完整性 |
+| 四、缺少操作人时的前置拦截 | 缺操作人检查、SENDER角色检查 | 返回403+错误信息 |
+| 五、RECEIVER角色可通过策略访问检查 | RECEIVER访问策略 | 检查通过 |
+| 六、操作人切换与版本递增 | 切换操作人 | 操作人变更、版本号递增 |
+| 七、配置版本快照与回退 | 修改触发版本、回退 | 快照保存、回退后配置恢复 |
+| 八、发布权限控制 | SENDER/RECEIVER发布 | SENDER被拒绝、RECEIVER可发布 |
+| 九、配置导出与导入 | 导出指定配置、导入新配置 | 导出数据格式、导入成功 |
+| 十、导入后配置一致性校验 | 导入后查询 | 主机/端口/名称一致 |
+| 十一、导入冲突检测与解决 | 同名冲突、SAVE_AS_NEW | 冲突返回409、另存为新配置、原配置保留 |
+| 十二、重启保持（数据库持久化校验） | 直接查询SQLite | 4张表存在、数据正确、快照和日志完整 |
+| 十三、操作日志完整性 | 全量操作审计 | 日志包含创建操作 |
+| 十四、入口URL上下文警告 | 缺操作人时获取入口URL | 返回操作人相关警告 |
+| 十五、默认配置获取 | 获取默认配置 | 返回标记为默认的配置 |
+| 十六、配置删除 | 删除后验证 | 删除成功、获取返回404 |
+
+#### 专项回归测试覆盖（必测场景）
+
+| 测试场景 | 验证目的 | 关键断言 |
+|---------|---------|---------|
+| **端口变更后入口仍可用** | 端口修改后入口URL自动更新 | 1. 修改端口后入口URL包含新端口；2. 恢复端口后URL恢复 |
+| **缺少操作人时的前置拦截** | 缺操作人/SENDER角色被拦截 | 1. operator_id=None返回403；2. SENDER角色返回403 |
+| **重启保持** | 配置写入SQLite持久化 | 1. 4张表存在；2. 数据正确；3. 快照和日志完整 |
+| **导入后配置一致** | 导入的配置数据与源一致 | 1. 主机地址一致；2. 端口一致 |
+| **冲突处理** | 同名配置导入冲突处理 | 1. 返回409；2. SAVE_AS_NEW后原配置保留；3. 新配置存在 |
+
+**运行测试：**
+```bash
+# 确保服务已启动
+python app.py
+
+# 新开终端运行测试
+python test_connection_center.py
+```
+
+---
+
+### 完整文件结构（最终版）
+
+```
+├── app.py                       # 后端服务（Flask + SQLite）
+├── requirements.txt           # 依赖列表
+├── README.md                  # 操作说明（本文档）
+├── archive_transfer.db        # SQLite 数据库（运行后自动创建）
+├── static/
+│   └── index.html         # 前端界面（含策略中心+连接与诊断中心UI）
+├── test_system.py             # 基础功能测试
+├── test_system_v2.py          # 签收后退回链路专项测试
+├── test_export_download.py    # 导出记录串批次回归测试
+├── test_review_v3.py          # 签收后异常复核测试
+├── test_encoding_stability.py # Windows控制台编码测试
+├── test_reminder_v4.py        # 催办与升级测试
+├── test_strategy_center.py    # 催办策略中心测试
+└── test_connection_center.py  # 连接与诊断中心测试（新增）
 ```

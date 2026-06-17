@@ -5,6 +5,8 @@ import json
 import csv
 import io
 import os
+import time
+import socket
 from datetime import datetime
 
 DATABASE = 'archive_transfer.db'
@@ -90,6 +92,44 @@ STRATEGY_ACTION = {
 }
 
 STRATEGY_PERMISSION_ROLES = ['RECEIVER']
+
+CONNECTION_STATUS = {
+    'UNKNOWN': '未探测',
+    'AVAILABLE': '可用',
+    'UNAVAILABLE': '不可用',
+    'TIMEOUT': '超时',
+    'ERROR': '错误'
+}
+
+CONNECTION_STATUS_NAME = {
+    'UNKNOWN': '未探测',
+    'AVAILABLE': '可用',
+    'UNAVAILABLE': '不可用',
+    'TIMEOUT': '超时',
+    'ERROR': '错误'
+}
+
+CONNECTION_LOG_ACTION = {
+    'CREATE_CONFIG': '创建连接配置',
+    'UPDATE_CONFIG': '更新连接配置',
+    'DELETE_CONFIG': '删除连接配置',
+    'PROBE_CONNECTION': '探测连接',
+    'OPEN_ENTRY': '打开入口',
+    'SWITCH_OPERATOR': '切换操作人',
+    'IMPORT_CONFIG': '导入连接配置',
+    'EXPORT_CONFIG': '导出连接配置',
+    'ROLLBACK_CONFIG': '回退配置',
+    'RESOLVE_CONFLICT': '解决配置冲突',
+    'PUBLISH_CONFIG': '发布配置'
+}
+
+CONNECTION_CONFLICT_RESOLUTION = {
+    'OVERWRITE': '覆盖本地',
+    'KEEP_LOCAL': '保留本地',
+    'SAVE_AS_NEW': '另存为新配置'
+}
+
+CONNECTION_PUBLISH_PERMISSION_ROLES = ['RECEIVER']
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -312,10 +352,85 @@ def init_db():
                     FOREIGN KEY (review_id) REFERENCES review_items(id),
                     UNIQUE(strategy_id, review_id))''')
     
+    c.execute('''CREATE TABLE IF NOT EXISTS connection_configs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_name TEXT UNIQUE NOT NULL,
+                    service_host TEXT NOT NULL DEFAULT '127.0.0.1',
+                    service_port INTEGER NOT NULL DEFAULT 5002,
+                    entry_path TEXT NOT NULL DEFAULT '/',
+                    protocol TEXT NOT NULL DEFAULT 'http',
+                    current_operator_id INTEGER,
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    is_published INTEGER NOT NULL DEFAULT 0,
+                    published_by INTEGER,
+                    published_at TIMESTAMP,
+                    last_probe_status TEXT DEFAULT 'UNKNOWN',
+                    last_probe_at TIMESTAMP,
+                    last_probe_message TEXT,
+                    last_available_at TIMESTAMP,
+                    config_version INTEGER NOT NULL DEFAULT 1,
+                    created_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_by INTEGER,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (current_operator_id) REFERENCES users(id),
+                    FOREIGN KEY (created_by) REFERENCES users(id),
+                    FOREIGN KEY (updated_by) REFERENCES users(id),
+                    FOREIGN KEY (published_by) REFERENCES users(id))''')
+    
+    for col in ['is_published', 'published_by', 'published_at', 'config_version']:
+        try:
+            c.execute(f'ALTER TABLE connection_configs ADD COLUMN {col}')
+        except sqlite3.OperationalError:
+            pass
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS connection_config_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    config_id INTEGER NOT NULL,
+                    snapshot_data TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    created_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (config_id) REFERENCES connection_configs(id),
+                    FOREIGN KEY (created_by) REFERENCES users(id))''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS connection_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    config_id INTEGER,
+                    profile_name TEXT,
+                    action TEXT NOT NULL,
+                    operator_id INTEGER,
+                    operator_name TEXT,
+                    detail TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (config_id) REFERENCES connection_configs(id),
+                    FOREIGN KEY (operator_id) REFERENCES users(id))''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS connection_diagnostics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    config_id INTEGER NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    diagnostic_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    suggestion TEXT,
+                    recovery_action TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (config_id) REFERENCES connection_configs(id))''')
+    
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO users (username, role) VALUES (?, ?)", ('sender', 'SENDER'))
         c.execute("INSERT INTO users (username, role) VALUES (?, ?)", ('receiver', 'RECEIVER'))
+    
+    c.execute("SELECT COUNT(*) FROM connection_configs")
+    if c.fetchone()[0] == 0:
+        c.execute('''INSERT INTO connection_configs 
+                     (profile_name, service_host, service_port, entry_path, protocol, 
+                      is_default, config_version)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                  ('默认连接', '127.0.0.1', 5002, '/', 'http', 1, 1))
     
     conn.commit()
     conn.close()
@@ -2867,6 +2982,995 @@ def get_strategy_effective_version(strategy_id):
         'effective_version': strategy['version'] if strategy['status'] == 'ACTIVE' else None,
         'effective_version_note': '当前版本即为生效版本' if strategy['status'] == 'ACTIVE' else '策略未启用，无生效版本',
         'version_history': version_history
+    })
+
+def enrich_connection_config(db, config):
+    config['status_name'] = CONNECTION_STATUS_NAME.get(config.get('last_probe_status', 'UNKNOWN'), config.get('last_probe_status', 'UNKNOWN'))
+    config['entry_url'] = f"{config['protocol']}://{config['service_host']}:{config['service_port']}{config['entry_path']}"
+    if config.get('current_operator_id'):
+        op = db.execute('SELECT username, role FROM users WHERE id = ?', (config['current_operator_id'],)).fetchone()
+        config['operator_name'] = op['username'] if op else None
+        config['operator_role'] = op['role'] if op else None
+        config['operator_role_name'] = USER_ROLES.get(op['role'], op['role']) if op else None
+    else:
+        config['operator_name'] = None
+        config['operator_role'] = None
+        config['operator_role_name'] = None
+    creator = db.execute('SELECT username FROM users WHERE id = ?', (config['created_by'],)).fetchone() if config.get('created_by') else None
+    config['creator_name'] = creator['username'] if creator else None
+    if config.get('updated_by'):
+        updator = db.execute('SELECT username FROM users WHERE id = ?', (config['updated_by'],)).fetchone()
+        config['updator_name'] = updator['username'] if updator else None
+    else:
+        config['updator_name'] = None
+    if config.get('published_by'):
+        publisher = db.execute('SELECT username FROM users WHERE id = ?', (config['published_by'],)).fetchone()
+        config['publisher_name'] = publisher['username'] if publisher else None
+    else:
+        config['publisher_name'] = None
+    return config
+
+def add_connection_log(db, config_id, profile_name, action, operator_id, detail=None):
+    op = db.execute('SELECT username FROM users WHERE id = ?', (operator_id,)).fetchone() if operator_id else None
+    operator_name = op['username'] if op else None
+    db.execute('''INSERT INTO connection_logs 
+                  (config_id, profile_name, action, operator_id, operator_name, detail)
+                  VALUES (?, ?, ?, ?, ?, ?)''',
+               (config_id, profile_name, action, operator_id, operator_name,
+                json.dumps(detail, ensure_ascii=False) if detail else None))
+
+def save_connection_snapshot(db, config_id, operator_id, version=None):
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return
+    snapshot_version = version if version else config['config_version']
+    snapshot_data = {
+        'profile_name': config['profile_name'],
+        'service_host': config['service_host'],
+        'service_port': config['service_port'],
+        'entry_path': config['entry_path'],
+        'protocol': config['protocol'],
+        'current_operator_id': config['current_operator_id'],
+        'is_default': config['is_default'],
+        'is_published': config['is_published'],
+        'last_probe_status': config['last_probe_status'],
+        'last_probe_at': config['last_probe_at'],
+        'config_version': snapshot_version
+    }
+    db.execute('''INSERT INTO connection_config_snapshots 
+                  (config_id, snapshot_data, version, created_by)
+                  VALUES (?, ?, ?, ?)''',
+               (config_id, json.dumps(snapshot_data, ensure_ascii=False), snapshot_version, operator_id))
+
+def check_connection_publish_permission(operator_id, db):
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return False, '操作员不存在'
+    if operator['role'] not in CONNECTION_PUBLISH_PERMISSION_ROLES:
+        return False, f'只有{",".join(CONNECTION_PUBLISH_PERMISSION_ROLES)}角色才能发布连接配置'
+    return True, None
+
+def run_diagnostics(db, config_id, host, port):
+    diagnostics = []
+    
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        if result == 0:
+            diag = {
+                'diagnostic_type': 'PORT_CONNECTIVITY',
+                'status': 'PASS',
+                'message': f'端口 {port} 可正常连接',
+                'suggestion': None,
+                'recovery_action': None
+            }
+        else:
+            diag = {
+                'diagnostic_type': 'PORT_CONNECTIVITY',
+                'status': 'FAIL',
+                'message': f'无法连接到端口 {port}，错误码: {result}',
+                'suggestion': '请检查服务是否启动、端口是否正确、防火墙是否放行',
+                'recovery_action': '检查服务进程: netstat -ano | findstr /R /C":{port}" ; 启动服务: python app.py'
+            }
+    except Exception as e:
+        diag = {
+            'diagnostic_type': 'PORT_CONNECTIVITY',
+            'status': 'ERROR',
+            'message': f'端口检测异常: {str(e)}',
+            'suggestion': '请检查网络连接和服务地址配置',
+            'recovery_action': '验证IP地址格式是否正确，尝试使用 127.0.0.1'
+        }
+    diagnostics.append(diag)
+    
+    try:
+        ip_valid = True
+        try:
+            socket.inet_aton(host)
+        except socket.error:
+            try:
+                socket.gethostbyname(host)
+            except socket.error:
+                ip_valid = False
+        if ip_valid:
+            diag = {
+                'diagnostic_type': 'HOST_RESOLUTION',
+                'status': 'PASS',
+                'message': f'主机地址 {host} 可解析',
+                'suggestion': None,
+                'recovery_action': None
+            }
+        else:
+            diag = {
+                'diagnostic_type': 'HOST_RESOLUTION',
+                'status': 'FAIL',
+                'message': f'无法解析主机地址 {host}',
+                'suggestion': '请检查主机名拼写或DNS配置',
+                'recovery_action': '尝试使用 127.0.0.1 或 localhost 作为主机地址'
+            }
+    except Exception as e:
+        diag = {
+            'diagnostic_type': 'HOST_RESOLUTION',
+            'status': 'ERROR',
+            'message': f'主机解析检测异常: {str(e)}',
+            'suggestion': None,
+            'recovery_action': None
+        }
+    diagnostics.append(diag)
+    
+    if not (0 < port < 65536):
+        diag = {
+            'diagnostic_type': 'PORT_VALIDATION',
+            'status': 'FAIL',
+            'message': f'端口号 {port} 不在有效范围内 (1-65535)',
+            'suggestion': '请输入有效的端口号',
+            'recovery_action': '默认端口为 5002，请修改为有效端口'
+        }
+    else:
+        diag = {
+            'diagnostic_type': 'PORT_VALIDATION',
+            'status': 'PASS',
+            'message': f'端口号 {port} 格式有效',
+            'suggestion': None,
+            'recovery_action': None
+        }
+    diagnostics.append(diag)
+    
+    try:
+        import urllib.request
+        import urllib.error
+        url = f"http://{host}:{port}/api/users"
+        req = urllib.request.Request(url)
+        urllib.request.urlopen(req, timeout=3)
+        diag = {
+            'diagnostic_type': 'API_RESPONSIVE',
+            'status': 'PASS',
+            'message': '后端API正常响应',
+            'suggestion': None,
+            'recovery_action': None
+        }
+    except urllib.error.URLError as e:
+        diag = {
+            'diagnostic_type': 'API_RESPONSIVE',
+            'status': 'FAIL',
+            'message': f'后端API无响应: {str(e)}',
+            'suggestion': '请确认后端服务已启动且运行在正确的端口上',
+            'recovery_action': '执行 python app.py 启动服务，等待 Flask 初始化完成后再探测'
+        }
+    except Exception as e:
+        diag = {
+            'diagnostic_type': 'API_RESPONSIVE',
+            'status': 'WARN',
+            'message': f'API检测跳过（非致命错误）: {str(e)}',
+            'suggestion': '端口已连通但API检测异常，可能是路径问题',
+            'recovery_action': '确认入口路径是否为 / 或其他自定义路径'
+        }
+    diagnostics.append(diag)
+    
+    for d in diagnostics:
+        db.execute('''INSERT INTO connection_diagnostics 
+                      (config_id, host, port, diagnostic_type, status, message, suggestion, recovery_action)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                   (config_id, host, port, d['diagnostic_type'], d['status'],
+                    d['message'], d['suggestion'], d['recovery_action']))
+    
+    return diagnostics
+
+@app.route('/api/connection/configs', methods=['GET'])
+def get_connection_configs():
+    db = get_db()
+    db.row_factory = dict_factory
+    configs = db.execute('SELECT * FROM connection_configs ORDER BY is_default DESC, created_at DESC').fetchall()
+    for c in configs:
+        enrich_connection_config(db, c)
+    return jsonify(configs)
+
+@app.route('/api/connection/configs/default', methods=['GET'])
+def get_default_connection_config():
+    db = get_db()
+    db.row_factory = dict_factory
+    config = db.execute('SELECT * FROM connection_configs WHERE is_default = 1 ORDER BY id DESC LIMIT 1').fetchone()
+    if not config:
+        config = db.execute('SELECT * FROM connection_configs ORDER BY id DESC LIMIT 1').fetchone()
+    if not config:
+        return jsonify({'error': '没有可用的连接配置'}), 404
+    enrich_connection_config(db, config)
+    return jsonify(config)
+
+@app.route('/api/connection/configs', methods=['POST'])
+def create_connection_config():
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    profile_name = data.get('profile_name', '').strip()
+    if not profile_name:
+        return jsonify({'error': '配置名称不能为空'}), 400
+    
+    existing = db.execute('SELECT * FROM connection_configs WHERE profile_name = ?', (profile_name,)).fetchone()
+    if existing:
+        return jsonify({'error': f'配置名称"{profile_name}"已存在'}), 409
+    
+    service_host = data.get('service_host', '127.0.0.1').strip()
+    service_port = int(data.get('service_port', 5002))
+    entry_path = data.get('entry_path', '/').strip() or '/'
+    protocol = data.get('protocol', 'http').strip() or 'http'
+    current_operator_id = data.get('current_operator_id')
+    
+    if current_operator_id:
+        op = db.execute('SELECT id FROM users WHERE id = ?', (current_operator_id,)).fetchone()
+        if not op:
+            return jsonify({'error': '指定的操作人不存在'}), 400
+    
+    if data.get('is_default'):
+        db.execute("UPDATE connection_configs SET is_default = 0, updated_at = CURRENT_TIMESTAMP")
+    
+    try:
+        cursor = db.execute('''INSERT INTO connection_configs 
+                              (profile_name, service_host, service_port, entry_path, protocol,
+                               current_operator_id, is_default, config_version, created_by, updated_by)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)''',
+                           (profile_name, service_host, service_port, entry_path, protocol,
+                            current_operator_id, 1 if data.get('is_default') else 0,
+                            operator_id, operator_id))
+        config_id = cursor.lastrowid
+        save_connection_snapshot(db, config_id, operator_id, 1)
+        add_connection_log(db, config_id, profile_name, CONNECTION_LOG_ACTION['CREATE_CONFIG'],
+                          operator_id, {'profile_name': profile_name})
+        db.commit()
+        config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+        enrich_connection_config(db, config)
+        return jsonify(config), 201
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'创建失败: {str(e)}'}), 500
+
+@app.route('/api/connection/configs/<int:config_id>', methods=['GET', 'PUT', 'DELETE'])
+def handle_connection_config(config_id):
+    db = get_db()
+    db.row_factory = dict_factory
+
+    if request.method == 'GET':
+        config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+        if not config:
+            return jsonify({'error': '连接配置不存在'}), 404
+        enrich_connection_config(db, config)
+        snapshots = db.execute('SELECT * FROM connection_config_snapshots WHERE config_id = ? ORDER BY version DESC', (config_id,)).fetchall()
+        for s in snapshots:
+            if s.get('snapshot_data') and isinstance(s['snapshot_data'], str):
+                try:
+                    s['snapshot_data'] = json.loads(s['snapshot_data'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            creator = db.execute('SELECT username FROM users WHERE id = ?', (s.get('created_by'),)).fetchone()
+            s['creator_name'] = creator['username'] if creator else '系统'
+        logs = db.execute('''SELECT cl.*, u.username as operator_name FROM connection_logs cl
+                           LEFT JOIN users u ON cl.operator_id = u.id
+                           WHERE cl.config_id = ? ORDER BY cl.created_at DESC LIMIT 50''', (config_id,)).fetchall()
+        latest_diag = db.execute('SELECT * FROM connection_diagnostics WHERE config_id = ? ORDER BY created_at DESC LIMIT 10', (config_id,)).fetchall()
+        context_warnings = []
+        if not config.get('current_operator_id'):
+            context_warnings.append({'message': '未设置当前操作人', 'suggestion': '请在操作人管理区域设置操作人'})
+        if config.get('last_probe_status') in ('UNAVAILABLE', 'TIMEOUT', 'ERROR'):
+            context_warnings.append({'message': f'最近探测状态为{config.get("last_probe_status")}', 'suggestion': '请执行探测或检查服务是否正常运行'})
+        return jsonify({'config': config, 'snapshots': snapshots, 'logs': logs, 'latest_diagnostics': latest_diag, 'context_warnings': context_warnings})
+
+    if request.method == 'DELETE':
+        config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+        if not config:
+            return jsonify({'error': '连接配置不存在'}), 404
+        profile_name = config['profile_name']
+        db.execute('DELETE FROM connection_config_snapshots WHERE config_id = ?', (config_id,))
+        db.execute('DELETE FROM connection_logs WHERE config_id = ?', (config_id,))
+        db.execute('DELETE FROM connection_diagnostics WHERE config_id = ?', (config_id,))
+        db.execute('DELETE FROM connection_configs WHERE id = ?', (config_id,))
+        add_connection_log(db, None, profile_name, CONNECTION_LOG_ACTION['DELETE_CONFIG'],
+                          None, {'deleted_config_id': config_id})
+        db.commit()
+        return jsonify({'message': '配置已删除'})
+
+    data = request.json
+    operator_id = data.get('updated_by') or data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return jsonify({'error': '连接配置不存在'}), 404
+    
+    profile_name = data.get('profile_name', config['profile_name']).strip()
+    if profile_name != config['profile_name']:
+        existing = db.execute('SELECT * FROM connection_configs WHERE profile_name = ? AND id != ?',
+                             (profile_name, config_id)).fetchone()
+        if existing:
+            return jsonify({'error': f'配置名称"{profile_name}"已存在'}), 409
+    
+    current_operator_id = data.get('current_operator_id', config['current_operator_id'])
+    if current_operator_id:
+        op = db.execute('SELECT id FROM users WHERE id = ?', (current_operator_id,)).fetchone()
+        if not op:
+            return jsonify({'error': '指定的操作人不存在'}), 400
+    
+    if data.get('is_default'):
+        db.execute("UPDATE connection_configs SET is_default = 0, updated_at = CURRENT_TIMESTAMP")
+    
+    old_version = config['config_version']
+    new_version = old_version + 1
+    
+    db.execute('''UPDATE connection_configs SET
+                  profile_name = ?, service_host = ?, service_port = ?, entry_path = ?, protocol = ?,
+                  current_operator_id = ?, is_default = ?, config_version = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''',
+               (profile_name,
+                data.get('service_host', config['service_host']),
+                int(data.get('service_port', config['service_port'])),
+                data.get('entry_path', config['entry_path']) or '/',
+                data.get('protocol', config['protocol']) or 'http',
+                current_operator_id,
+                1 if data.get('is_default') else config['is_default'],
+                new_version, operator_id, config_id))
+    
+    save_connection_snapshot(db, config_id, operator_id, new_version)
+    add_connection_log(db, config_id, profile_name, CONNECTION_LOG_ACTION['UPDATE_CONFIG'],
+                      operator_id, {'from_version': old_version, 'to_version': new_version, 'changes': data})
+    db.commit()
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    enrich_connection_config(db, config)
+    return jsonify(config)
+
+@app.route('/api/connection/configs/<int:config_id>/probe', methods=['POST'])
+def probe_connection(config_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return jsonify({'error': '连接配置不存在'}), 404
+    
+    host = config['service_host']
+    port = int(config['service_port'])
+    
+    diagnostics = run_diagnostics(db, config_id, host, port)
+    
+    all_pass = all(d['status'] == 'PASS' for d in diagnostics)
+    any_fail = any(d['status'] == 'FAIL' for d in diagnostics)
+    
+    if all_pass:
+        status = 'AVAILABLE'
+        message = '连接正常，所有诊断项通过'
+    elif any_fail:
+        status = 'UNAVAILABLE'
+        fail_msgs = [d['message'] for d in diagnostics if d['status'] == 'FAIL']
+        message = '连接不可用: ' + '; '.join(fail_msgs)
+    else:
+        status = 'ERROR'
+        message = '连接检测存在异常'
+    
+    db.execute('''UPDATE connection_configs SET
+                  last_probe_status = ?, last_probe_at = CURRENT_TIMESTAMP,
+                  last_probe_message = ?,
+                  last_available_at = CASE WHEN ? = 'AVAILABLE' THEN CURRENT_TIMESTAMP ELSE last_available_at END,
+                  updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''',
+               (status, message, status, config_id))
+    
+    probe_detail = {
+        'status': status,
+        'host': host,
+        'port': port,
+        'diagnostics': diagnostics,
+        'summary': {
+            'pass': sum(1 for d in diagnostics if d['status'] == 'PASS'),
+            'fail': sum(1 for d in diagnostics if d['status'] == 'FAIL'),
+            'warn': sum(1 for d in diagnostics if d['status'] == 'WARN'),
+            'error': sum(1 for d in diagnostics if d['status'] == 'ERROR'),
+            'total': len(diagnostics)
+        }
+    }
+    
+    recovery_suggestions = []
+    context_gaps = []
+    
+    if status != 'AVAILABLE':
+        if not config['current_operator_id']:
+            context_gaps.append('缺少当前操作人，请先选择操作人')
+        for d in diagnostics:
+            if d['status'] == 'FAIL':
+                if d['suggestion']:
+                    recovery_suggestions.append({
+                        'item': d['diagnostic_type'],
+                        'suggestion': d['suggestion'],
+                        'action': d['recovery_action']
+                    })
+        if not context_gaps:
+            context_gaps.append('连接上下文完整，但网络/服务层面存在问题')
+    
+    add_connection_log(db, config_id, config['profile_name'], CONNECTION_LOG_ACTION['PROBE_CONNECTION'],
+                      operator_id, probe_detail)
+    db.commit()
+    
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    enrich_connection_config(db, config)
+    
+    return jsonify({
+        'config': config,
+        'probe': probe_detail,
+        'status': status,
+        'status_name': CONNECTION_STATUS_NAME.get(status, status),
+        'message': message,
+        'context_gaps': context_gaps,
+        'recovery_suggestions': recovery_suggestions,
+        'is_available': status == 'AVAILABLE'
+    })
+
+@app.route('/api/connection/configs/<int:config_id>/entry-url', methods=['GET'])
+def get_connection_entry_url(config_id):
+    db = get_db()
+    db.row_factory = dict_factory
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return jsonify({'error': '连接配置不存在'}), 404
+    enrich_connection_config(db, config)
+    context_warnings = []
+    if not config['current_operator_id']:
+        context_warnings.append('未设置操作人，访问策略中心等功能将被拦截')
+    if config['last_probe_status'] != 'AVAILABLE' and config['last_probe_status'] != 'UNKNOWN':
+        context_warnings.append(f'最近一次探测状态: {config["status_name"]}，可能无法正常访问')
+    add_connection_log(db, config_id, config['profile_name'], CONNECTION_LOG_ACTION['OPEN_ENTRY'],
+                      config['updated_by'] or config['created_by'],
+                      {'entry_url': config['entry_url'], 'context_warnings': context_warnings})
+    db.commit()
+    return jsonify({
+        'entry_url': config['entry_url'],
+        'config': config,
+        'context_warnings': context_warnings,
+        'can_access_strategies': bool(config['current_operator_id'] and config['operator_role'] == 'RECEIVER'),
+        'operator_required': config['current_operator_id'] is None
+    })
+
+@app.route('/api/connection/configs/<int:config_id>/switch-operator', methods=['POST'])
+def switch_connection_operator(config_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = data.get('operator_id')
+    new_operator_id = data.get('new_operator_id')
+    if not operator_id or not new_operator_id:
+        return jsonify({'error': '缺少operator_id或new_operator_id参数'}), 400
+    
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return jsonify({'error': '连接配置不存在'}), 404
+    
+    new_op = db.execute('SELECT * FROM users WHERE id = ?', (new_operator_id,)).fetchone()
+    if not new_op:
+        return jsonify({'error': '新操作人不存在'}), 404
+    
+    old_version = config['config_version']
+    new_version = old_version + 1
+    
+    db.execute('''UPDATE connection_configs SET
+                  current_operator_id = ?, config_version = ?,
+                  updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''',
+               (new_operator_id, new_version, operator_id, config_id))
+    
+    save_connection_snapshot(db, config_id, operator_id, new_version)
+    add_connection_log(db, config_id, config['profile_name'], CONNECTION_LOG_ACTION['SWITCH_OPERATOR'],
+                      operator_id,
+                      {'from_operator_id': config['current_operator_id'],
+                       'to_operator_id': new_operator_id,
+                       'to_operator_name': new_op['username'],
+                       'to_operator_role': new_op['role'],
+                       'version_change': f'v{old_version}→v{new_version}'})
+    db.commit()
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    enrich_connection_config(db, config)
+    return jsonify({
+        'config': config,
+        'can_access_strategies': config['operator_role'] == 'RECEIVER',
+        'message': f'操作人已切换为 {config["operator_name"]} ({config["operator_role_name"]})'
+    })
+
+@app.route('/api/connection/export', methods=['GET'])
+def export_connection_configs():
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = request.args.get('operator_id', type=int)
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    op = db.execute('SELECT username, role FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not op:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    config_ids = request.args.get('ids')
+    if config_ids:
+        ids = [int(x) for x in config_ids.split(',') if x.strip()]
+        placeholders = ','.join(['?'] * len(ids))
+        configs = db.execute(f'SELECT * FROM connection_configs WHERE id IN ({placeholders})', ids).fetchall()
+    else:
+        configs = db.execute('SELECT * FROM connection_configs ORDER BY is_default DESC, created_at DESC').fetchall()
+    
+    export_data = []
+    for c in configs:
+        snapshots = db.execute('''SELECT version, created_at, snapshot_data 
+                                  FROM connection_config_snapshots 
+                                  WHERE config_id = ? ORDER BY version''', (c['id'],)).fetchall()
+        version_history = []
+        for snap in snapshots:
+            try:
+                snap_data = json.loads(snap['snapshot_data'])
+            except Exception:
+                snap_data = {}
+            version_history.append({
+                'version': snap['version'],
+                'created_at': snap['created_at'],
+                'snapshot': snap_data
+            })
+        export_data.append({
+            'profile_name': c['profile_name'],
+            'service_host': c['service_host'],
+            'service_port': c['service_port'],
+            'entry_path': c['entry_path'],
+            'protocol': c['protocol'],
+            'is_default': bool(c['is_default']),
+            'is_published': bool(c['is_published']),
+            'config_version': c['config_version'],
+            'status': c.get('last_probe_status', 'UNKNOWN'),
+            'last_probe_at': c['last_probe_at'],
+            'last_available_at': c['last_available_at'],
+            'version_history': version_history,
+            'export_info': {
+                'original_id': c['id'],
+                'original_created_at': c['created_at'],
+                'original_updated_at': c['updated_at'],
+                'original_config_version': c['config_version']
+            }
+        })
+        add_connection_log(db, c['id'], c['profile_name'], CONNECTION_LOG_ACTION['EXPORT_CONFIG'],
+                          operator_id, {'exported_at': datetime.now().isoformat()})
+    
+    db.commit()
+    return jsonify({
+        'version': '1.0',
+        'export_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'exported_by': f"{op['username']} ({USER_ROLES.get(op['role'], op['role'])})",
+        'exported_count': len(export_data),
+        'configs': export_data
+    })
+
+@app.route('/api/connection/import', methods=['POST'])
+def import_connection_configs():
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    op = db.execute('SELECT id, role FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not op:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    import_configs = data.get('configs')
+    if not import_configs or not isinstance(import_configs, list):
+        return jsonify({'error': '导入数据格式错误，应为配置数组'}), 400
+    
+    conflicts = []
+    validation_errors = []
+    valid_configs = []
+    
+    for idx, c_data in enumerate(import_configs):
+        errors = []
+        if not c_data.get('profile_name'):
+            errors.append('配置名称不能为空')
+        if not c_data.get('service_host'):
+            errors.append('服务地址不能为空')
+        port = c_data.get('service_port')
+        if not isinstance(port, int) or not (0 < port < 65536):
+            errors.append('端口必须是1-65535之间的有效整数')
+        if errors:
+            validation_errors.append({'index': idx, 'name': c_data.get('profile_name', f'配置{idx}'), 'errors': errors})
+            continue
+        
+        existing = db.execute('SELECT * FROM connection_configs WHERE profile_name = ?',
+                             (c_data['profile_name'],)).fetchone()
+        if existing:
+            conflicts.append({
+                'index': idx,
+                'import_name': c_data['profile_name'],
+                'local_id': existing['id'],
+                'local_profile_name': existing['profile_name'],
+                'local_host': existing['service_host'],
+                'local_port': existing['service_port'],
+                'import_host': c_data.get('service_host'),
+                'import_port': c_data.get('service_port'),
+                'import_version': c_data.get('config_version'),
+                'local_version': existing['config_version'],
+                'default_resolution': 'KEEP_LOCAL'
+            })
+        
+        for other in valid_configs:
+            if other['profile_name'] == c_data['profile_name']:
+                errors.append(f'导入数据中存在重复的配置名称"{c_data["profile_name"]}"')
+                break
+        
+        if not errors:
+            valid_configs.append(c_data)
+    
+    if validation_errors:
+        return jsonify({
+            'error': '导入数据校验失败',
+            'validation_errors': validation_errors,
+            'conflicts': conflicts,
+            'valid_count': len(valid_configs)
+        }), 400
+    
+    if conflicts:
+        return jsonify({
+            'error': '存在配置冲突，请选择解决方式',
+            'conflicts': conflicts,
+            'valid_count': len(valid_configs),
+            'conflict_count': len(conflicts),
+            'requires_resolution': True
+        }), 409
+    
+    imported_ids = []
+    try:
+        for c_data in valid_configs:
+            if c_data.get('is_default'):
+                db.execute("UPDATE connection_configs SET is_default = 0, updated_at = CURRENT_TIMESTAMP")
+            
+            cursor = db.execute('''INSERT INTO connection_configs 
+                                  (profile_name, service_host, service_port, entry_path, protocol,
+                                   is_default, config_version, created_by, updated_by)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                               (c_data['profile_name'],
+                                c_data.get('service_host', '127.0.0.1'),
+                                int(c_data.get('service_port', 5002)),
+                                c_data.get('entry_path', '/') or '/',
+                                c_data.get('protocol', 'http') or 'http',
+                                1 if c_data.get('is_default') else 0,
+                                int(c_data.get('config_version', 1)),
+                                operator_id, operator_id))
+            config_id = cursor.lastrowid
+            imported_ids.append(config_id)
+            save_connection_snapshot(db, config_id, operator_id, int(c_data.get('config_version', 1)))
+            add_connection_log(db, config_id, c_data['profile_name'], CONNECTION_LOG_ACTION['IMPORT_CONFIG'],
+                              operator_id, {'imported_name': c_data['profile_name']})
+        
+        db.commit()
+        result_configs = []
+        for sid in imported_ids:
+            c = db.execute('SELECT * FROM connection_configs WHERE id = ?', (sid,)).fetchone()
+            enrich_connection_config(db, c)
+            result_configs.append(c)
+        
+        return jsonify({
+            'success': True,
+            'imported_count': len(imported_ids),
+            'imported_ids': imported_ids,
+            'configs': result_configs
+        })
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'导入失败: {str(e)}'}), 500
+
+@app.route('/api/connection/import/resolve', methods=['POST'])
+def resolve_connection_conflicts():
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    resolutions = data.get('resolutions')
+    import_configs = data.get('configs')
+    if not resolutions or not isinstance(resolutions, dict):
+        return jsonify({'error': '缺少冲突解决配置'}), 400
+    if not import_configs or not isinstance(import_configs, list):
+        return jsonify({'error': '缺少导入配置数据'}), 400
+    
+    imported_ids = []
+    resolution_logs = []
+    
+    try:
+        for idx_str, resolution in resolutions.items():
+            idx = int(idx_str)
+            if idx >= len(import_configs):
+                continue
+            c_data = import_configs[idx]
+            mode = resolution.get('mode', 'KEEP_LOCAL')
+            
+            if mode == 'KEEP_LOCAL':
+                resolution_logs.append({
+                    'index': idx, 'name': c_data.get('profile_name'),
+                    'mode': mode, 'result': 'SKIPPED'
+                })
+                continue
+            
+            existing = db.execute('SELECT * FROM connection_configs WHERE profile_name = ?',
+                                 (c_data['profile_name'],)).fetchone()
+            
+            if mode == 'OVERWRITE' and existing:
+                old_version = existing['config_version']
+                new_version = max(old_version, int(c_data.get('config_version', 1))) + 1
+                db.execute('''UPDATE connection_configs SET
+                              service_host = ?, service_port = ?, entry_path = ?, protocol = ?,
+                              config_version = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                              WHERE id = ?''',
+                           (c_data.get('service_host', existing['service_host']),
+                            int(c_data.get('service_port', existing['service_port'])),
+                            c_data.get('entry_path', existing['entry_path']) or '/',
+                            c_data.get('protocol', existing['protocol']) or 'http',
+                            new_version, operator_id, existing['id']))
+                save_connection_snapshot(db, existing['id'], operator_id, new_version)
+                add_connection_log(db, existing['id'], c_data['profile_name'],
+                                  CONNECTION_LOG_ACTION['RESOLVE_CONFLICT'], operator_id,
+                                  {'mode': 'OVERWRITE', 'from_version': old_version, 'to_version': new_version})
+                imported_ids.append(existing['id'])
+                resolution_logs.append({
+                    'index': idx, 'name': c_data.get('profile_name'),
+                    'mode': mode, 'result': 'OVERWRITTEN', 'config_id': existing['id']
+                })
+            
+            elif mode == 'SAVE_AS_NEW':
+                new_name = resolution.get('new_name', f"{c_data['profile_name']}_导入_{int(time.time())}")
+                if c_data.get('is_default'):
+                    db.execute("UPDATE connection_configs SET is_default = 0, updated_at = CURRENT_TIMESTAMP")
+                cursor = db.execute('''INSERT INTO connection_configs 
+                                      (profile_name, service_host, service_port, entry_path, protocol,
+                                       is_default, config_version, created_by, updated_by)
+                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                   (new_name,
+                                    c_data.get('service_host', '127.0.0.1'),
+                                    int(c_data.get('service_port', 5002)),
+                                    c_data.get('entry_path', '/') or '/',
+                                    c_data.get('protocol', 'http') or 'http',
+                                    1 if c_data.get('is_default') else 0,
+                                    int(c_data.get('config_version', 1)),
+                                    operator_id, operator_id))
+                config_id = cursor.lastrowid
+                save_connection_snapshot(db, config_id, operator_id, int(c_data.get('config_version', 1)))
+                add_connection_log(db, config_id, new_name, CONNECTION_LOG_ACTION['RESOLVE_CONFLICT'],
+                                  operator_id, {'mode': 'SAVE_AS_NEW', 'original_name': c_data['profile_name'], 'new_name': new_name})
+                imported_ids.append(config_id)
+                resolution_logs.append({
+                    'index': idx, 'name': c_data.get('profile_name'),
+                    'mode': mode, 'new_name': new_name,
+                    'result': 'CREATED_AS_NEW', 'config_id': config_id
+                })
+        
+        db.commit()
+        result_configs = []
+        for sid in imported_ids:
+            c = db.execute('SELECT * FROM connection_configs WHERE id = ?', (sid,)).fetchone()
+            enrich_connection_config(db, c)
+            result_configs.append(c)
+        
+        return jsonify({
+            'success': True,
+            'imported_count': len(imported_ids),
+            'imported_ids': imported_ids,
+            'resolution_logs': resolution_logs,
+            'configs': result_configs
+        })
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'冲突解决失败: {str(e)}'}), 500
+
+@app.route('/api/connection/configs/<int:config_id>/rollback', methods=['POST'])
+def rollback_connection_config(config_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return jsonify({'error': '连接配置不存在'}), 404
+    
+    target_version = data.get('target_version')
+    if target_version is None:
+        target_version = config['config_version'] - 1
+    if target_version < 1:
+        return jsonify({'error': '没有更早的版本可以回退'}), 400
+    
+    snapshot = db.execute('''SELECT * FROM connection_config_snapshots 
+                             WHERE config_id = ? AND version = ? ORDER BY id DESC LIMIT 1''',
+                          (config_id, target_version)).fetchone()
+    if not snapshot:
+        return jsonify({'error': f'找不到版本 {target_version} 的快照'}), 404
+    
+    try:
+        snap_data = json.loads(snapshot['snapshot_data'])
+    except Exception as e:
+        return jsonify({'error': f'快照数据解析失败: {str(e)}'}), 500
+    
+    old_version = config['config_version']
+    
+    db.execute('''UPDATE connection_configs SET
+                  profile_name = ?, service_host = ?, service_port = ?, entry_path = ?, protocol = ?,
+                  current_operator_id = ?, is_default = ?, config_version = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''',
+               (snap_data.get('profile_name', config['profile_name']),
+                snap_data.get('service_host', config['service_host']),
+                int(snap_data.get('service_port', config['service_port'])),
+                snap_data.get('entry_path', config['entry_path']) or '/',
+                snap_data.get('protocol', config['protocol']) or 'http',
+                snap_data.get('current_operator_id'),
+                snap_data.get('is_default', 0),
+                target_version, operator_id, config_id))
+    
+    save_connection_snapshot(db, config_id, operator_id, target_version)
+    add_connection_log(db, config_id, config['profile_name'], CONNECTION_LOG_ACTION['ROLLBACK_CONFIG'],
+                      operator_id, {'from_version': old_version, 'to_version': target_version})
+    db.commit()
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    enrich_connection_config(db, config)
+    return jsonify({
+        'success': True,
+        'from_version': old_version,
+        'to_version': target_version,
+        'config': config
+    })
+
+@app.route('/api/connection/configs/<int:config_id>/publish', methods=['POST'])
+def publish_connection_config(config_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    operator_id = data.get('operator_id')
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    ok, err = check_connection_publish_permission(operator_id, db)
+    if not ok:
+        return jsonify({'error': err}), 403
+    
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return jsonify({'error': '连接配置不存在'}), 404
+    
+    if config['is_published']:
+        return jsonify({'error': '该配置已经是发布状态'}), 400
+    
+    db.execute('''UPDATE connection_configs SET
+                  is_published = 1, published_by = ?, published_at = CURRENT_TIMESTAMP,
+                  updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?''', (operator_id, config_id))
+    
+    add_connection_log(db, config_id, config['profile_name'], CONNECTION_LOG_ACTION['PUBLISH_CONFIG'],
+                      operator_id, {'published_version': config['config_version']})
+    db.commit()
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    enrich_connection_config(db, config)
+    return jsonify(config)
+
+@app.route('/api/connection/logs', methods=['GET'])
+def get_connection_logs():
+    db = get_db()
+    db.row_factory = dict_factory
+    config_id = request.args.get('config_id', type=int)
+    query = 'SELECT * FROM connection_logs'
+    params = []
+    if config_id:
+        query += ' WHERE config_id = ?'
+        params.append(config_id)
+    query += ' ORDER BY created_at DESC LIMIT 100'
+    logs = db.execute(query, params).fetchall()
+    for log in logs:
+        if log.get('detail'):
+            try:
+                log['detail'] = json.loads(log['detail'])
+            except Exception:
+                pass
+    return jsonify(logs)
+
+@app.route('/api/connection/check-strategy-access', methods=['POST'])
+def check_strategy_access():
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    config_id = data.get('config_id')
+    operator_id = data.get('operator_id')
+    
+    if not config_id or not operator_id:
+        return jsonify({
+            'has_access': False,
+            'blocked': True,
+            'reason': '缺少必要参数',
+            'required_fields': ['config_id', 'operator_id'],
+            'suggestion': '请在连接与诊断中心中选择配置并设置操作人'
+        })
+    
+    config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
+    if not config:
+        return jsonify({
+            'has_access': False,
+            'blocked': True,
+            'reason': '连接配置不存在',
+            'suggestion': '请先创建有效的连接配置'
+        })
+    
+    op = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not op:
+        return jsonify({
+            'has_access': False,
+            'blocked': True,
+            'reason': '操作人不存在',
+            'suggestion': '请选择有效的操作人账号'
+        })
+    
+    if not config['current_operator_id']:
+        return jsonify({
+            'has_access': False,
+            'blocked': True,
+            'reason': '当前连接未设置操作人',
+            'suggestion': '请在连接与诊断中心中设置当前操作人',
+            'missing_context': ['current_operator_id']
+        })
+    
+    if op['role'] not in STRATEGY_PERMISSION_ROLES:
+        return jsonify({
+            'has_access': False,
+            'blocked': True,
+            'reason': f'操作人角色为{USER_ROLES.get(op["role"], op["role"])}，无权访问策略中心',
+            'required_role': 'RECEIVER（接收方）',
+            'suggestion': '请切换到接收方(RECEIVER)角色的账号后再访问策略中心',
+            'current_role': op['role'],
+            'current_role_name': USER_ROLES.get(op['role'], op['role'])
+        })
+    
+    return jsonify({
+        'has_access': True,
+        'blocked': False,
+        'operator': {
+            'id': op['id'],
+            'username': op['username'],
+            'role': op['role'],
+            'role_name': USER_ROLES.get(op['role'], op['role'])
+        },
+        'config': {
+            'id': config['id'],
+            'profile_name': config['profile_name'],
+            'entry_url': f"{config['protocol']}://{config['service_host']}:{config['service_port']}{config['entry_path']}"
+        },
+        'can_view_list': True,
+        'can_view_version': True,
+        'can_view_detail': True,
+        'can_export': True
     })
 
 if __name__ == '__main__':

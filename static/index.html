@@ -183,6 +183,59 @@ tr:hover { background: #f8f9fa; }
 
 .multi-select-dropdown { position: relative; }
 .multi-select-dropdown select { width: 100%; padding: 8px; border: 1px solid #dde2eb; border-radius: 6px; font-size: 13px; }
+
+.conn-status-tag { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.conn-status-UNKNOWN { background: #f5f5f5; color: #757575; }
+.conn-status-AVAILABLE { background: #e8f5e9; color: #388e3c; }
+.conn-status-UNAVAILABLE { background: #ffebee; color: #d32f2f; }
+.conn-status-TIMEOUT { background: #fff3e0; color: #f57c00; }
+.conn-status-ERROR { background: #ffebee; color: #c62828; }
+
+.conn-published-tag { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; background: #e3f2fd; color: #1976d2; }
+
+.conn-card { border: 1px solid #e0e0e0; border-radius: 10px; padding: 16px; margin-bottom: 12px; background: #fafbfc; transition: all 0.2s; }
+.conn-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.conn-card.is-default { border-left: 4px solid #667eea; background: #f5f7ff; }
+.conn-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+.conn-card-title { font-weight: 600; font-size: 16px; color: #333; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.conn-card-meta { font-size: 12px; color: #888; margin-top: 6px; }
+.conn-card-body { font-size: 13px; color: #555; line-height: 1.8; }
+.conn-info-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px; }
+.conn-info-item { background: white; padding: 8px 10px; border-radius: 6px; border: 1px solid #eef0f3; }
+.conn-info-item .lbl { font-size: 11px; color: #888; margin-bottom: 2px; }
+.conn-info-item .val { font-size: 13px; font-weight: 600; color: #333; word-break: break-all; }
+
+.diagnostic-card { border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.diagnostic-card.pass { border-left: 4px solid #43a047; background: #f1f8e9; }
+.diagnostic-card.fail { border-left: 4px solid #e53935; background: #ffebee; }
+.diagnostic-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.diagnostic-card-title { font-weight: 600; font-size: 14px; }
+.diagnostic-card-msg { font-size: 13px; color: #555; margin-bottom: 6px; }
+.diagnostic-card-suggest { font-size: 13px; color: #e65100; background: #fff8e1; padding: 8px; border-radius: 6px; margin-bottom: 6px; }
+.diagnostic-card-recovery { background: white; padding: 8px; border-radius: 6px; border: 1px dashed #ddd; font-family: 'Courier New', monospace; font-size: 12px; }
+.diagnostic-card-recovery-label { font-size: 11px; color: #888; margin-bottom: 4px; }
+
+.context-warning { background: #fff3e0; padding: 12px; border-radius: 8px; border-left: 4px solid #ff9800; margin-bottom: 16px; }
+.context-warning-title { font-weight: 600; color: #e65100; margin-bottom: 6px; }
+.context-warning-item { font-size: 13px; color: #795548; margin-bottom: 4px; }
+
+.conflict-card { border: 1px solid #ffcdd2; border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #ffebee; }
+.conflict-card-header { font-weight: 600; color: #c62828; margin-bottom: 8px; }
+.conflict-card-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
+.conflict-card-side { background: white; padding: 10px; border-radius: 6px; font-size: 12px; }
+.conflict-card-side-title { font-weight: 600; margin-bottom: 6px; font-size: 13px; }
+.conflict-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.entry-url-display { background: #e8f5e9; padding: 12px; border-radius: 8px; border: 1px solid #c8e6c9; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.entry-url { font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600; color: #2e7d32; word-break: break-all; }
+
+.version-item { background: #f8f9fa; padding: 10px 12px; border-radius: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.version-item.current { background: #e3f2fd; border: 1px solid #90caf9; }
+.version-info { font-size: 13px; }
+.version-info .v { font-weight: 600; color: #1976d2; }
+.version-info .meta { font-size: 12px; color: #888; margin-top: 2px; }
+
+.snapshot-data-preview { background: white; padding: 10px; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 11px; max-height: 200px; overflow: auto; color: #555; }
 </style>
 </head>
 <body>
@@ -216,6 +269,9 @@ tr:hover { background: #f8f9fa; }
         </button>
         <button :class="['tab', {active: activeTopTab === 'strategies'}]" @click="activeTopTab = 'strategies'; loadStrategies()" v-if="currentUser?.role === 'RECEIVER'">
           ⚙️ 催办策略中心
+        </button>
+        <button :class="['tab', {active: activeTopTab === 'connections'}]" @click="activeTopTab = 'connections'; loadConnectionConfigs()">
+          🔌 连接与诊断中心
         </button>
       </div>
 
@@ -861,6 +917,461 @@ tr:hover { background: #f8f9fa; }
           </div>
         </div>
       </div>
+
+      <div v-if="activeTopTab === 'connections'">
+        <div class="strategy-tab-bar">
+          <button :class="['strategy-tab', {active: connectionView === 'list'}]" @click="connectionView = 'list'; loadConnectionConfigs()">📋 配置列表</button>
+          <button :class="['strategy-tab', {active: connectionView === 'create'}]" @click="connectionView = 'create'; resetConnectionForm()">+ 新建配置</button>
+          <button :class="['strategy-tab', {active: connectionView === 'import'}]" @click="connectionView = 'import'">📥 导入配置</button>
+          <button :class="['strategy-tab', {active: connectionView === 'export'}]" @click="connectionView = 'export'; loadConnectionConfigs()">📤 导出配置</button>
+          <button :class="['strategy-tab', {active: connectionView === 'logs'}]" @click="connectionView = 'logs'; loadConnectionLogs()">📋 操作日志</button>
+        </div>
+
+        <div v-if="connectionView === 'list'" class="card">
+          <div class="card-title">
+            <span>🔌 连接配置列表</span>
+            <span>共 {{ connectionConfigs.length }} 条配置</span>
+          </div>
+
+          <div v-if="connectionConfigs.length === 0" class="empty-state">
+            <div class="icon">🔌</div>
+            <div>暂无连接配置，点击"新建配置"创建第一条</div>
+          </div>
+
+          <div v-for="c in connectionConfigs" :key="c.id" :class="['conn-card', {'is-default': c.is_default}]">
+            <div class="conn-card-header">
+              <div>
+                <div class="conn-card-title">
+                  {{ c.profile_name }}
+                  <span v-if="c.is_default" class="conn-status-tag conn-status-AVAILABLE">⭐ 默认</span>
+                  <span :class="['conn-status-tag', 'conn-status-' + c.last_probe_status]">
+                    {{ c.last_probe_status === 'AVAILABLE' ? '✅ 可用' : 
+                       c.last_probe_status === 'UNAVAILABLE' ? '❌ 不可用' :
+                       c.last_probe_status === 'TIMEOUT' ? '⏱️ 超时' :
+                       c.last_probe_status === 'ERROR' ? '⚠️ 错误' : '❓ 未探测' }}
+                  </span>
+                  <span v-if="c.is_published" class="conn-published-tag">📢 已发布</span>
+                  <span class="review-summary-badge" style="margin-left: 8px;">版本: v{{ c.config_version }}</span>
+                </div>
+                <div class="conn-card-meta">
+                  创建人: {{ c.creator_name || '-' }} | 创建时间: {{ c.created_at }}
+                  <span v-if="c.updated_at"> | 更新人: {{ c.updator_name || '-' }} | 更新时间: {{ c.updated_at }}</span>
+                  <span v-if="c.last_probe_at"> | 最近探测: {{ c.last_probe_at }}</span>
+                  <span v-if="c.last_available_at"> | 最近可用: {{ c.last_available_at }}</span>
+                </div>
+              </div>
+              <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                <button class="btn btn-sm btn-primary" @click="viewConnectionDetail(c.id)">📋 详情</button>
+                <button class="btn btn-sm btn-success" @click="probeConnection(c.id)">🔍 探测</button>
+                <button class="btn btn-sm btn-warning" @click="getAndOpenEntryUrl(c.id)">🌐 打开入口</button>
+                <button class="btn btn-sm btn-secondary" @click="editConnectionConfig(c)">✏️ 编辑</button>
+                <button class="btn btn-sm btn-success" @click="publishConnectionConfig(c.id)" v-if="currentUser?.role === 'RECEIVER' && !c.is_published">📢 发布</button>
+                <button class="btn btn-sm btn-danger" @click="deleteConnectionConfig(c.id)">🗑️ 删除</button>
+              </div>
+            </div>
+            <div class="conn-card-body">
+              <div class="conn-info-grid">
+                <div class="conn-info-item">
+                  <div class="lbl">服务地址</div>
+                  <div class="val">{{ c.service_host }}</div>
+                </div>
+                <div class="conn-info-item">
+                  <div class="lbl">服务端口</div>
+                  <div class="val">{{ c.service_port }}</div>
+                </div>
+                <div class="conn-info-item">
+                  <div class="lbl">协议</div>
+                  <div class="val">{{ c.protocol }}</div>
+                </div>
+                <div class="conn-info-item">
+                  <div class="lbl">入口路径</div>
+                  <div class="val">{{ c.entry_path }}</div>
+                </div>
+                <div class="conn-info-item">
+                  <div class="lbl">当前操作人</div>
+                  <div class="val">{{ c.operator_name || '未设置' }}</div>
+                </div>
+                <div class="conn-info-item">
+                  <div class="lbl">操作人角色</div>
+                  <div class="val">{{ c.operator_role || '-' }}</div>
+                </div>
+                <div class="conn-info-item">
+                  <div class="lbl">入口URL</div>
+                  <div class="val" style="font-family:'Courier New',monospace; font-size:12px;">{{ c.entry_url }}</div>
+                </div>
+                <div class="conn-info-item">
+                  <div class="lbl">探测消息</div>
+                  <div class="val" style="font-size:12px;">{{ c.last_probe_message || '-' }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="connectionView === 'create'" class="card">
+          <div class="card-title">
+            <span>{{ editingConnectionId ? '✏️ 编辑连接配置' : '➕ 新建连接配置' }}</span>
+            <button class="btn btn-secondary btn-sm" @click="connectionView = 'list'">返回列表</button>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>配置名称 *</label>
+              <input v-model="connectionForm.profile_name" placeholder="如：本地开发环境、测试环境等">
+            </div>
+            <div class="form-group">
+              <label>协议</label>
+              <select v-model="connectionForm.protocol">
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>服务地址 *</label>
+              <input v-model="connectionForm.service_host" placeholder="如：127.0.0.1、localhost">
+            </div>
+            <div class="form-group">
+              <label>服务端口 *</label>
+              <input v-model.number="connectionForm.service_port" type="number" min="1" max="65535" placeholder="如：5002">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>入口路径</label>
+              <input v-model="connectionForm.entry_path" placeholder="如：/ 或 /index.html">
+            </div>
+            <div class="form-group">
+              <label>当前操作人</label>
+              <select v-model="connectionForm.current_operator_id">
+                <option :value="null">-- 不指定 --</option>
+                <option v-for="u in users" :key="u.id" :value="u.id">{{ u.username }} ({{ u.role_name }})</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>
+              <input type="checkbox" v-model="connectionForm.is_default" style="width:16px; height:16px; margin-right:8px;">
+              设为默认配置
+            </label>
+          </div>
+
+          <div class="review-tip">
+            <strong>入口URL预览：</strong> 
+            <span style="font-family:'Courier New',monospace; font-weight:600;">
+              {{ connectionForm.protocol }}://{{ connectionForm.service_host }}:{{ connectionForm.service_port }}{{ connectionForm.entry_path }}
+            </span>
+          </div>
+
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button class="btn btn-secondary" @click="connectionView = 'list'">取消</button>
+            <button class="btn btn-primary" @click="saveConnectionConfig" :disabled="!canSaveConnectionConfig">
+              {{ editingConnectionId ? '保存修改' : '创建配置' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="connectionView === 'import'" class="card">
+          <div class="card-title">
+            <span>📥 导入连接配置</span>
+            <button class="btn btn-secondary btn-sm" @click="connectionView = 'list'">返回列表</button>
+          </div>
+
+          <div class="review-tip">
+            <strong>导入说明：</strong>请粘贴从其他系统导出的连接配置JSON数据。系统会自动校验格式、检查重复名称，如与本地配置存在冲突，会弹出冲突解决界面让您选择处理方式。
+          </div>
+
+          <div class="form-group">
+            <label>粘贴JSON数据 *</label>
+            <textarea class="json-editor" v-model="connImportJsonText" rows="12" placeholder='{"configs": [{"profile_name": "本地环境", "service_host": "127.0.0.1", "service_port": 5002, ...}], "export_time": "..."}'></textarea>
+          </div>
+
+          <div v-if="connImportError" class="alert alert-error">
+            <strong>导入失败：</strong>{{ connImportError }}
+          </div>
+
+          <div v-if="connImportConflicts && connImportConflicts.length > 0" style="margin-bottom: 16px;">
+            <div class="card-title" style="margin-bottom: 12px; font-size:16px;">⚠️ 检测到配置冲突，请选择处理方式：</div>
+            <div v-for="(cf, idx) in connImportConflicts" :key="idx" class="conflict-card">
+              <div class="conflict-card-header">配置名称冲突：{{ cf.local.profile_name }}</div>
+              <div class="conflict-card-compare">
+                <div class="conflict-card-side">
+                  <div class="conflict-card-side-title">📍 本地版本 (v{{ cf.local.config_version }})</div>
+                  <div>地址: {{ cf.local.service_host }}:{{ cf.local.service_port }}</div>
+                  <div>操作人: {{ cf.local.operator_name || '-' }}</div>
+                  <div>更新时间: {{ cf.local.updated_at || cf.local.created_at }}</div>
+                </div>
+                <div class="conflict-card-side">
+                  <div class="conflict-card-side-title">📥 导入版本</div>
+                  <div>地址: {{ cf.imported.service_host }}:{{ cf.imported.service_port }}</div>
+                  <div>操作人: {{ cf.imported.operator_name || cf.imported.current_operator_id || '-' }}</div>
+                  <div>配置版本: v{{ cf.imported.config_version || 1 }}</div>
+                </div>
+              </div>
+              <div class="conflict-card-actions">
+                <button class="btn btn-sm btn-danger" @click="resolveConflict(idx, 'OVERWRITE')">🟥 覆盖本地</button>
+                <button class="btn btn-sm btn-success" @click="resolveConflict(idx, 'KEEP_LOCAL')">🟩 保留本地</button>
+                <button class="btn btn-sm btn-warning" @click="resolveConflictWithNewName(idx)">🟧 另存为新配置</button>
+              </div>
+              <div v-if="connConflictNewNames && connConflictNewNames[idx]" style="margin-top: 8px;">
+                <input v-model="connConflictNewNames[idx]" placeholder="请输入新的配置名称" style="padding:6px 10px; border:1px solid #dde2eb; border-radius:6px; width:280px;">
+              </div>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button class="btn btn-secondary" @click="connectionView = 'list'">取消</button>
+            <button class="btn btn-primary" @click="importConnectionConfigs" :disabled="!connImportJsonText">开始导入</button>
+            <button v-if="connImportConflicts && connImportConflicts.length > 0" class="btn btn-success" @click="finalizeImport">✅ 确认并完成导入</button>
+          </div>
+        </div>
+
+        <div v-if="connectionView === 'export'" class="card">
+          <div class="card-title">
+            <span>📤 导出连接配置</span>
+            <button class="btn btn-secondary btn-sm" @click="connectionView = 'list'">返回列表</button>
+          </div>
+
+          <div class="form-group">
+            <label>选择要导出的配置（不选则导出全部）</label>
+            <div class="checkbox-group">
+              <label class="checkbox-label" v-for="c in connectionConfigs" :key="c.id">
+                <input type="checkbox" v-model="connExportSelectedIds" :value="c.id">
+                {{ c.profile_name }}
+                <span :class="['conn-status-tag', 'conn-status-' + c.last_probe_status]" style="margin-left:4px;">
+                  {{ c.last_probe_status === 'AVAILABLE' ? '可用' : c.last_probe_status === 'UNKNOWN' ? '未探测' : '异常' }}
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>导出结果（复制下方JSON）</label>
+            <textarea class="json-editor" v-model="connExportResult" rows="12" readonly></textarea>
+          </div>
+
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button class="btn btn-secondary" @click="connectionView = 'list'">取消</button>
+            <button class="btn btn-primary" @click="exportConnectionConfigs">生成导出数据</button>
+            <button class="btn btn-success" @click="copyConnExportResult" :disabled="!connExportResult">📋 复制到剪贴板</button>
+          </div>
+        </div>
+
+        <div v-if="connectionView === 'logs'" class="card">
+          <div class="card-title">
+            <span>📋 连接中心操作日志</span>
+            <button class="btn btn-secondary btn-sm" @click="connectionView = 'list'">返回列表</button>
+          </div>
+
+          <div v-if="connectionLogs.length === 0" class="empty-state">
+            <div class="icon">📋</div>
+            <div>暂无操作日志</div>
+          </div>
+
+          <div v-for="log in connectionLogs" :key="log.id" class="log-item">
+            <div class="log-item-header">
+              <span>
+                <span class="log-item-action">{{ log.action }}</span>
+                <span v-if="log.profile_name" style="margin-left: 8px;">配置: {{ log.profile_name }}</span>
+              </span>
+              <span>{{ log.created_at }} | {{ log.operator_name || '系统' }}</span>
+            </div>
+            <div v-if="log.detail" class="log-item-detail">
+              详情: {{ log.detail }}
+            </div>
+          </div>
+        </div>
+
+        <div v-if="connectionView === 'detail' && selectedConnectionDetail" class="card">
+          <div class="card-title">
+            <span>📋 配置详情 - {{ selectedConnectionDetail.config.profile_name }}</span>
+            <button class="btn btn-secondary btn-sm" @click="connectionView = 'list'">返回列表</button>
+          </div>
+
+          <div class="strategy-tab-bar">
+            <button :class="['strategy-tab', {active: connectionDetailTab === 'info'}]" @click="connectionDetailTab = 'info'">基本信息</button>
+            <button :class="['strategy-tab', {active: connectionDetailTab === 'diagnostics'}]" @click="connectionDetailTab = 'diagnostics'">诊断记录</button>
+            <button :class="['strategy-tab', {active: connectionDetailTab === 'history'}]" @click="connectionDetailTab = 'history'">版本历史</button>
+            <button :class="['strategy-tab', {active: connectionDetailTab === 'logs'}]" @click="connectionDetailTab = 'logs'">操作日志</button>
+          </div>
+
+          <div v-if="connectionDetailTab === 'info'">
+            <div v-if="selectedConnectionDetail.context_warnings && selectedConnectionDetail.context_warnings.length > 0" class="context-warning">
+              <div class="context-warning-title">⚠️ 上下文完整性警告（{{ selectedConnectionDetail.context_warnings.length }}项）</div>
+              <div v-for="(cw, idx) in selectedConnectionDetail.context_warnings" :key="idx" class="context-warning-item">
+                • {{ cw.message }}
+                <span v-if="cw.suggestion" style="margin-left:8px; color:#d84315;">建议：{{ cw.suggestion }}</span>
+              </div>
+            </div>
+
+            <div class="info-grid" style="margin-bottom: 20px;">
+              <div class="info-card">
+                <div class="label">连接状态</div>
+                <div class="value">
+                  <span :class="['conn-status-tag', 'conn-status-' + selectedConnectionDetail.config.last_probe_status]">
+                    {{ selectedConnectionDetail.config.last_probe_status === 'AVAILABLE' ? '✅ 可用' : 
+                       selectedConnectionDetail.config.last_probe_status === 'UNAVAILABLE' ? '❌ 不可用' :
+                       selectedConnectionDetail.config.last_probe_status === 'TIMEOUT' ? '⏱️ 超时' :
+                       selectedConnectionDetail.config.last_probe_status === 'ERROR' ? '⚠️ 错误' : '❓ 未探测' }}
+                  </span>
+                </div>
+              </div>
+              <div class="info-card">
+                <div class="label">配置版本</div>
+                <div class="value">v{{ selectedConnectionDetail.config.config_version }}</div>
+              </div>
+              <div class="info-card">
+                <div class="label">是否默认</div>
+                <div class="value">{{ selectedConnectionDetail.config.is_default ? '⭐ 是' : '否' }}</div>
+              </div>
+              <div class="info-card">
+                <div class="label">发布状态</div>
+                <div class="value">
+                  <span v-if="selectedConnectionDetail.config.is_published" class="conn-published-tag">📢 已发布</span>
+                  <span v-else style="color:#757575;">未发布</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="conn-info-grid" style="margin-bottom: 16px;">
+              <div class="conn-info-item">
+                <div class="lbl">协议</div>
+                <div class="val">{{ selectedConnectionDetail.config.protocol }}</div>
+              </div>
+              <div class="conn-info-item">
+                <div class="lbl">服务主机</div>
+                <div class="val">{{ selectedConnectionDetail.config.service_host }}</div>
+              </div>
+              <div class="conn-info-item">
+                <div class="lbl">服务端口</div>
+                <div class="val">{{ selectedConnectionDetail.config.service_port }}</div>
+              </div>
+              <div class="conn-info-item">
+                <div class="lbl">入口路径</div>
+                <div class="val">{{ selectedConnectionDetail.config.entry_path }}</div>
+              </div>
+            </div>
+
+            <div class="entry-url-display" style="margin-bottom: 16px;">
+              <div>
+                <div style="font-size:12px; color:#2e7d32; margin-bottom:4px;">🌐 浏览器入口地址</div>
+                <div class="entry-url">{{ selectedConnectionDetail.config.entry_url }}</div>
+              </div>
+              <button class="btn btn-success" @click="openUrlInNewTab(selectedConnectionDetail.config.entry_url)">🚀 自动打开</button>
+            </div>
+
+            <div class="card" style="background:#f8f9fa; margin-bottom:16px;">
+              <div class="card-title" style="font-size:16px; margin-bottom:12px;">
+                <span>👤 操作人管理</span>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>当前操作人</label>
+                  <div style="padding:10px; background:white; border-radius:6px; border:1px solid #eef0f3;">
+                    <strong>{{ selectedConnectionDetail.config.operator_name || '未设置' }}</strong>
+                    <span v-if="selectedConnectionDetail.config.operator_role" :class="['role-tag', selectedConnectionDetail.config.operator_role === 'SENDER' ? 'role-sender' : 'role-receiver']" style="margin-left:8px;">
+                      {{ selectedConnectionDetail.config.operator_role === 'SENDER' ? '发送方' : '接收方' }}
+                    </span>
+                  </div>
+                </div>
+                <div class="form-group">
+                  <label>切换操作人 *</label>
+                  <select v-model="connSwitchOperatorId" style="width:100%; padding:10px; border:1px solid #dde2eb; border-radius:6px;">
+                    <option :value="null">-- 请选择新操作人 --</option>
+                    <option v-for="u in users" :key="u.id" :value="u.id">{{ u.username }} ({{ u.role_name }})</option>
+                  </select>
+                </div>
+              </div>
+              <div style="display:flex; gap:8px; justify-content:flex-end;">
+                <button class="btn btn-primary btn-sm" @click="switchConnectionOperator" :disabled="!connSwitchOperatorId">🔄 切换操作人</button>
+                <button class="btn btn-warning btn-sm" @click="checkStrategyAccess">🔐 策略访问前置检查</button>
+              </div>
+            </div>
+
+            <div v-if="connAccessCheckResult" class="card" style="margin-bottom:16px;" :class="connAccessCheckResult.ok ? 'alert-success' : 'alert-error'">
+              <div style="font-weight:600; margin-bottom:8px;">
+                {{ connAccessCheckResult.ok ? '✅ 策略访问检查通过' : '❌ 策略访问检查未通过' }}
+              </div>
+              <div v-if="connAccessCheckResult.message">{{ connAccessCheckResult.message }}</div>
+              <div v-if="connAccessCheckResult.suggestions && connAccessCheckResult.suggestions.length">
+                <div style="margin-top:8px; font-weight:500;">建议操作：</div>
+                <div v-for="(s, i) in connAccessCheckResult.suggestions" :key="i" style="margin-left:16px; color:#d84315;">• {{ s }}</div>
+              </div>
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap;">
+              <button class="btn btn-success" @click="probeConnection(selectedConnectionDetail.config.id); loadConnectionDetail(selectedConnectionDetail.config.id)">🔍 重新探测</button>
+              <button class="btn btn-warning" @click="getAndOpenEntryUrl(selectedConnectionDetail.config.id)">🌐 打开入口</button>
+              <button class="btn btn-secondary" @click="editConnectionConfig(selectedConnectionDetail.config)">✏️ 编辑配置</button>
+              <button class="btn btn-primary" @click="publishConnectionConfig(selectedConnectionDetail.config.id)" v-if="currentUser?.role === 'RECEIVER' && !selectedConnectionDetail.config.is_published">📢 发布配置</button>
+              <button class="btn btn-danger" @click="rollbackConnectionConfig" v-if="selectedConnectionDetail.snapshots && selectedConnectionDetail.snapshots.length > 1">↩️ 回退版本</button>
+            </div>
+          </div>
+
+          <div v-if="connectionDetailTab === 'diagnostics'">
+            <div v-if="selectedConnectionDetail.latest_diagnostics && selectedConnectionDetail.latest_diagnostics.length > 0">
+              <div class="card-title" style="font-size:16px; margin-bottom:12px;">🔬 最近一次诊断结果</div>
+              <div v-for="d in selectedConnectionDetail.latest_diagnostics" :key="d.id" :class="['diagnostic-card', d.status === 'PASS' ? 'pass' : 'fail']">
+                <div class="diagnostic-card-header">
+                  <div class="diagnostic-card-title">
+                    {{ d.status === 'PASS' ? '✅' : '❌' }} {{ d.diagnostic_type === 'PORT_CONNECTIVITY' ? '端口连通性' : 
+                        d.diagnostic_type === 'HOST_RESOLUTION' ? '主机解析' :
+                        d.diagnostic_type === 'PORT_VALIDATION' ? '端口有效性' : 'API响应检测' }}
+                  </div>
+                  <span style="font-size:12px; color:#888;">{{ d.created_at }}</span>
+                </div>
+                <div class="diagnostic-card-msg">{{ d.message }}</div>
+                <div v-if="d.suggestion" class="diagnostic-card-suggest">💡 {{ d.suggestion }}</div>
+                <div v-if="d.recovery_action">
+                  <div class="diagnostic-card-recovery-label">可执行的恢复操作：</div>
+                  <div class="diagnostic-card-recovery">{{ d.recovery_action }}</div>
+                </div>
+              </div>
+            </div>
+            <div v-else style="color:#999; text-align:center; padding:40px;">
+              暂无诊断记录，请先执行探测
+            </div>
+          </div>
+
+          <div v-if="connectionDetailTab === 'history'">
+            <div v-if="!selectedConnectionDetail.snapshots || selectedConnectionDetail.snapshots.length === 0" style="color:#999; text-align:center; padding:40px;">
+              暂无版本历史
+            </div>
+            <div v-for="snap in selectedConnectionDetail.snapshots" :key="snap.id" :class="['version-item', {current: snap.version === selectedConnectionDetail.config.config_version}]">
+              <div class="version-info">
+                <span class="v">版本 v{{ snap.version }}</span>
+                <span v-if="snap.version === selectedConnectionDetail.config.config_version" class="conn-published-tag" style="margin-left:8px;">当前版本</span>
+                <div class="meta">创建人: {{ snap.creator_name || '系统' }} | 创建时间: {{ snap.created_at }}</div>
+              </div>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <button class="btn btn-sm btn-secondary" @click="toggleSnapshotView(snap.id)">👁️ 查看内容</button>
+                <button class="btn btn-sm btn-warning" @click="rollbackConnectionToVersion(snap.version)" :disabled="snap.version === selectedConnectionDetail.config.config_version">↩️ 回退到此版本</button>
+              </div>
+            </div>
+            <div v-for="snap in selectedConnectionDetail.snapshots" :key="'view-'+snap.id" v-if="connExpandedSnapshots[snap.id]" class="card" style="margin-bottom:12px; background:#fafbfc;">
+              <div class="card-title" style="font-size:14px; margin-bottom:8px;">版本 v{{ snap.version }} 配置内容</div>
+              <div class="snapshot-data-preview">{{ formatSnapshotData(snap.snapshot_data) }}</div>
+            </div>
+          </div>
+
+          <div v-if="connectionDetailTab === 'logs'">
+            <div v-if="!selectedConnectionDetail.logs || selectedConnectionDetail.logs.length === 0" style="color:#999; text-align:center; padding:40px;">
+              暂无操作日志
+            </div>
+            <div v-for="log in selectedConnectionDetail.logs" :key="log.id" class="log-item">
+              <div class="log-item-header">
+                <span class="log-item-action">{{ log.action }}</span>
+                <span>{{ log.created_at }} | {{ log.operator_name || '系统' }}</span>
+              </div>
+              <div v-if="log.detail" class="log-item-detail">详情: {{ log.detail }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </template>
 
     <template v-else>
@@ -1442,7 +1953,7 @@ const { createApp, ref, computed, onMounted } = Vue;
 
 createApp({
   setup() {
-    const API = 'http://127.0.0.1:5000/api';
+    const API = 'http://127.0.0.1:5002/api';
     const users = ref([]);
     const currentUserId = ref(null);
     const batches = ref([]);
@@ -2470,6 +2981,450 @@ createApp({
       });
     }
 
+    const connectionConfigs = ref([]);
+    const connectionView = ref('list');
+    const connectionDetailTab = ref('info');
+    const selectedConnectionDetail = ref(null);
+    const editingConnectionId = ref(null);
+    const connectionLogs = ref([]);
+    const connSwitchOperatorId = ref(null);
+    const connAccessCheckResult = ref(null);
+    const connExpandedSnapshots = ref({});
+
+    const connectionForm = ref({
+      profile_name: '',
+      service_host: '127.0.0.1',
+      service_port: 5002,
+      entry_path: '/',
+      protocol: 'http',
+      current_operator_id: null,
+      is_default: false
+    });
+
+    const connImportJsonText = ref('');
+    const connImportError = ref('');
+    const connImportConflicts = ref([]);
+    const connConflictResolutions = ref([]);
+    const connConflictNewNames = ref({});
+    const connImportPendingData = ref(null);
+
+    const connExportSelectedIds = ref([]);
+    const connExportResult = ref('');
+
+    const canSaveConnectionConfig = computed(() => {
+      return connectionForm.value.profile_name && connectionForm.value.service_host && connectionForm.value.service_port;
+    });
+
+    function resetConnectionForm() {
+      editingConnectionId.value = null;
+      connectionForm.value = {
+        profile_name: '',
+        service_host: '127.0.0.1',
+        service_port: 5002,
+        entry_path: '/',
+        protocol: 'http',
+        current_operator_id: null,
+        is_default: false
+      };
+    }
+
+    async function loadConnectionConfigs() {
+      try {
+        const res = await fetch(`${API}/connection/configs`);
+        if (res.ok) {
+          connectionConfigs.value = await res.json();
+        }
+      } catch (e) {
+        showAlert('加载连接配置失败: ' + e.message, 'error');
+      }
+    }
+
+    async function loadConnectionDetail(configId) {
+      try {
+        const res = await fetch(`${API}/connection/configs/${configId}`);
+        if (res.ok) {
+          selectedConnectionDetail.value = await res.json();
+          connAccessCheckResult.value = null;
+        }
+      } catch (e) {
+        showAlert('加载配置详情失败: ' + e.message, 'error');
+      }
+    }
+
+    async function viewConnectionDetail(configId) {
+      await loadConnectionDetail(configId);
+      connectionView.value = 'detail';
+      connectionDetailTab.value = 'info';
+      connExpandedSnapshots.value = {};
+    }
+
+    function editConnectionConfig(config) {
+      editingConnectionId.value = config.id;
+      connectionForm.value = {
+        profile_name: config.profile_name,
+        service_host: config.service_host,
+        service_port: config.service_port,
+        entry_path: config.entry_path,
+        protocol: config.protocol,
+        current_operator_id: config.current_operator_id,
+        is_default: !!config.is_default
+      };
+      connectionView.value = 'create';
+    }
+
+    async function saveConnectionConfig() {
+      try {
+        const url = editingConnectionId.value
+          ? `${API}/connection/configs/${editingConnectionId.value}`
+          : `${API}/connection/configs`;
+        const method = editingConnectionId.value ? 'PUT' : 'POST';
+        const body = {
+          ...connectionForm.value,
+          updated_by: currentUserId.value
+        };
+        if (!editingConnectionId.value) {
+          body.created_by = currentUserId.value;
+        }
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showAlert(editingConnectionId.value ? '配置更新成功！' : '配置创建成功！');
+          connectionView.value = 'list';
+          loadConnectionConfigs();
+        } else {
+          showAlert(result.error || '操作失败', 'error');
+        }
+      } catch (e) {
+        showAlert('保存配置失败: ' + e.message, 'error');
+      }
+    }
+
+    async function deleteConnectionConfig(configId) {
+      if (!confirm('确定删除此连接配置？')) return;
+      try {
+        const res = await fetch(`${API}/connection/configs/${configId}`, { method: 'DELETE' });
+        if (res.ok) {
+          showAlert('配置已删除');
+          loadConnectionConfigs();
+          if (selectedConnectionDetail.value && selectedConnectionDetail.value.config.id === configId) {
+            selectedConnectionDetail.value = null;
+            connectionView.value = 'list';
+          }
+        } else {
+          const result = await res.json();
+          showAlert(result.error || '删除失败', 'error');
+        }
+      } catch (e) {
+        showAlert('删除失败: ' + e.message, 'error');
+      }
+    }
+
+    async function probeConnection(configId) {
+      try {
+        const res = await fetch(`${API}/connection/configs/${configId}/probe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: currentUserId.value })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          const status = result.probe_status;
+          if (status === 'AVAILABLE') {
+            showAlert('✅ 连接探测成功，服务可用！');
+          } else {
+            showAlert(`⚠️ 连接探测结果: ${result.probe_message || status}`, 'error');
+          }
+          loadConnectionConfigs();
+        } else {
+          showAlert(result.error || '探测失败', 'error');
+        }
+      } catch (e) {
+        showAlert('探测请求失败: ' + e.message, 'error');
+      }
+    }
+
+    async function getAndOpenEntryUrl(configId) {
+      try {
+        const res = await fetch(`${API}/connection/configs/${configId}/entry-url`);
+        const result = await res.json();
+        if (res.ok) {
+          if (result.warnings && result.warnings.length > 0) {
+            const warnMsgs = result.warnings.map(w => w.message).join('\n');
+            if (!confirm(`入口存在以下警告：\n${warnMsgs}\n\n是否仍要打开？`)) return;
+          }
+          openUrlInNewTab(result.entry_url);
+          showAlert('正在打开入口: ' + result.entry_url);
+        } else {
+          showAlert(result.error || '获取入口失败', 'error');
+        }
+      } catch (e) {
+        showAlert('获取入口失败: ' + e.message, 'error');
+      }
+    }
+
+    function openUrlInNewTab(url) {
+      window.open(url, '_blank');
+    }
+
+    async function switchConnectionOperator() {
+      if (!selectedConnectionDetail.value || !connSwitchOperatorId.value) return;
+      try {
+        const configId = selectedConnectionDetail.value.config.id;
+        const res = await fetch(`${API}/connection/configs/${configId}/switch-operator`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            operator_id: connSwitchOperatorId.value,
+            updated_by: currentUserId.value
+          })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showAlert('操作人切换成功！');
+          connSwitchOperatorId.value = null;
+          loadConnectionDetail(configId);
+          loadConnectionConfigs();
+        } else {
+          showAlert(result.error || '切换失败', 'error');
+        }
+      } catch (e) {
+        showAlert('切换操作人失败: ' + e.message, 'error');
+      }
+    }
+
+    async function checkStrategyAccess() {
+      if (!selectedConnectionDetail.value) return;
+      try {
+        const configId = selectedConnectionDetail.value.config.id;
+        const config = selectedConnectionDetail.value.config;
+        const operatorId = config.current_operator_id || currentUserId.value;
+        const res = await fetch(`${API}/connection/check-strategy-access`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config_id: configId, operator_id: operatorId })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          connAccessCheckResult.value = result;
+        } else {
+          connAccessCheckResult.value = { ok: false, message: result.error || '检查失败', suggestions: result.suggestions || [] };
+        }
+      } catch (e) {
+        connAccessCheckResult.value = { ok: false, message: '请求失败: ' + e.message, suggestions: [] };
+      }
+    }
+
+    async function publishConnectionConfig(configId) {
+      try {
+        const res = await fetch(`${API}/connection/configs/${configId}/publish`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: currentUserId.value })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showAlert('📢 配置发布成功！');
+          loadConnectionConfigs();
+          if (selectedConnectionDetail.value && selectedConnectionDetail.value.config.id === configId) {
+            loadConnectionDetail(configId);
+          }
+        } else {
+          showAlert(result.error || '发布失败', 'error');
+        }
+      } catch (e) {
+        showAlert('发布失败: ' + e.message, 'error');
+      }
+    }
+
+    async function rollbackConnectionConfig() {
+      if (!selectedConnectionDetail.value) return;
+      const config = selectedConnectionDetail.value.config;
+      const targetVersion = config.config_version - 1;
+      if (targetVersion < 1) {
+        showAlert('没有可回退的版本', 'error');
+        return;
+      }
+      if (!confirm(`确定回退到版本 v${targetVersion}？`)) return;
+      await rollbackConnectionToVersion(targetVersion);
+    }
+
+    async function rollbackConnectionToVersion(targetVersion) {
+      if (!selectedConnectionDetail.value) return;
+      const configId = selectedConnectionDetail.value.config.id;
+      try {
+        const res = await fetch(`${API}/connection/configs/${configId}/rollback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_version: targetVersion, operator_id: currentUserId.value })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showAlert(`↩️ 已回退到版本 v${targetVersion}`);
+          loadConnectionDetail(configId);
+          loadConnectionConfigs();
+        } else {
+          showAlert(result.error || '回退失败', 'error');
+        }
+      } catch (e) {
+        showAlert('回退失败: ' + e.message, 'error');
+      }
+    }
+
+    async function loadConnectionLogs() {
+      try {
+        const res = await fetch(`${API}/connection/logs`);
+        if (res.ok) {
+          connectionLogs.value = await res.json();
+        }
+      } catch (e) {
+        showAlert('加载日志失败: ' + e.message, 'error');
+      }
+    }
+
+    async function exportConnectionConfigs() {
+      try {
+        let url = `${API}/connection/export`;
+        if (connExportSelectedIds.value.length > 0) {
+          url += `?config_ids=${connExportSelectedIds.value.join(',')}`;
+        }
+        const res = await fetch(url);
+        if (res.ok) {
+          const result = await res.json();
+          connExportResult.value = JSON.stringify(result, null, 2);
+          showAlert('导出数据已生成！');
+        } else {
+          const result = await res.json();
+          showAlert(result.error || '导出失败', 'error');
+        }
+      } catch (e) {
+        showAlert('导出失败: ' + e.message, 'error');
+      }
+    }
+
+    function copyConnExportResult() {
+      navigator.clipboard.writeText(connExportResult.value).then(() => {
+        showAlert('已复制到剪贴板！');
+      }).catch(() => {
+        showAlert('复制失败，请手动复制', 'error');
+      });
+    }
+
+    async function importConnectionConfigs() {
+      connImportError.value = '';
+      connImportConflicts.value = [];
+      connConflictResolutions.value = [];
+      connConflictNewNames.value = {};
+      connImportPendingData.value = null;
+
+      if (!connImportJsonText.value.trim()) {
+        connImportError.value = '请粘贴JSON数据';
+        return;
+      }
+      try {
+        const parsed = JSON.parse(connImportJsonText.value);
+        const configs = parsed.configs || parsed;
+        if (!Array.isArray(configs)) {
+          connImportError.value = 'JSON格式错误：configs字段应为数组';
+          return;
+        }
+        const res = await fetch(`${API}/connection/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ configs, operator_id: currentUserId.value })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showAlert(`✅ 成功导入 ${result.imported_count} 条配置！`);
+          connImportJsonText.value = '';
+          loadConnectionConfigs();
+        } else if (res.status === 409) {
+          connImportConflicts.value = result.conflicts;
+          connImportPendingData.value = { configs, operator_id: currentUserId.value };
+          showAlert(`⚠️ 检测到 ${result.conflicts.length} 个配置冲突，请选择处理方式`, 'error');
+        } else {
+          connImportError.value = result.error || '导入失败';
+        }
+      } catch (e) {
+        if (e instanceof SyntaxError) {
+          connImportError.value = 'JSON格式不合法，请检查数据';
+        } else {
+          connImportError.value = '导入失败: ' + e.message;
+        }
+      }
+    }
+
+    function resolveConflict(idx, resolution) {
+      connConflictResolutions.value[idx] = { resolution };
+      if (resolution === 'SAVE_AS_NEW') {
+        const cf = connImportConflicts.value[idx];
+        connConflictNewNames.value[idx] = cf.imported.profile_name + '_导入副本';
+      }
+    }
+
+    function resolveConflictWithNewName(idx) {
+      resolveConflict(idx, 'SAVE_AS_NEW');
+    }
+
+    async function finalizeImport() {
+      if (!connImportPendingData.value) return;
+      const unresolved = connImportConflicts.value.filter((_, idx) => !connConflictResolutions.value[idx]);
+      if (unresolved.length > 0) {
+        showAlert('请为所有冲突选择处理方式', 'error');
+        return;
+      }
+      try {
+        const resolutions = {};
+        connConflictResolutions.value.forEach((r, idx) => {
+          if (r && r.resolution) {
+            resolutions[String(idx)] = {
+              mode: r.resolution,
+              new_name: r.resolution === 'SAVE_AS_NEW'
+                ? (connConflictNewNames.value[idx] || connImportConflicts.value[idx].imported.profile_name + '_导入副本')
+                : null
+            };
+          }
+        });
+        const res = await fetch(`${API}/connection/import/resolve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            configs: connImportPendingData.value.configs,
+            operator_id: connImportPendingData.value.operator_id,
+            resolutions
+          })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showAlert(`✅ 冲突解决完成，成功导入 ${result.imported_count} 条配置！`);
+          connImportConflicts.value = [];
+          connConflictResolutions.value = [];
+          connConflictNewNames.value = {};
+          connImportPendingData.value = null;
+          connImportJsonText.value = '';
+          loadConnectionConfigs();
+          connectionView.value = 'list';
+        } else {
+          showAlert(result.error || '解决冲突失败', 'error');
+        }
+      } catch (e) {
+        showAlert('解决冲突失败: ' + e.message, 'error');
+      }
+    }
+
+    function toggleSnapshotView(snapId) {
+      connExpandedSnapshots.value[snapId] = !connExpandedSnapshots.value[snapId];
+    }
+
+    function formatSnapshotData(data) {
+      if (!data) return '';
+      if (typeof data === 'string') return data;
+      return JSON.stringify(data, null, 2);
+    }
+
     onMounted(() => {
       fetchUsers();
       loadBatches();
@@ -2505,7 +3460,20 @@ createApp({
       loadStrategies, viewStrategyDetail, editStrategy, saveStrategy,
       previewStrategy, previewStrategyForm, enableStrategy, disableStrategy,
       rollbackStrategy, loadStrategyLogs, importStrategies, exportStrategies,
-      copyExportResult
+      copyExportResult,
+      connectionConfigs, connectionView, connectionDetailTab, selectedConnectionDetail,
+      editingConnectionId, connectionLogs, connSwitchOperatorId, connAccessCheckResult,
+      connExpandedSnapshots, connectionForm, connImportJsonText, connImportError,
+      connImportConflicts, connConflictResolutions, connConflictNewNames,
+      connExportSelectedIds, connExportResult, canSaveConnectionConfig,
+      resetConnectionForm, loadConnectionConfigs, loadConnectionDetail,
+      viewConnectionDetail, editConnectionConfig, saveConnectionConfig,
+      deleteConnectionConfig, probeConnection, getAndOpenEntryUrl,
+      openUrlInNewTab, switchConnectionOperator, checkStrategyAccess,
+      publishConnectionConfig, rollbackConnectionConfig, rollbackConnectionToVersion,
+      loadConnectionLogs, exportConnectionConfigs, copyConnExportResult,
+      importConnectionConfigs, resolveConflict, resolveConflictWithNewName,
+      finalizeImport, toggleSnapshotView, formatSnapshotData
     };
   }
 }).mount('#app');
