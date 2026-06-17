@@ -3425,8 +3425,10 @@ def probe_connection(config_id):
         'config': config,
         'probe': probe_detail,
         'status': status,
+        'probe_status': status,
         'status_name': CONNECTION_STATUS_NAME.get(status, status),
         'message': message,
+        'probe_message': message,
         'context_gaps': context_gaps,
         'recovery_suggestions': recovery_suggestions,
         'is_available': status == 'AVAILABLE'
@@ -3453,6 +3455,7 @@ def get_connection_entry_url(config_id):
         'entry_url': config['entry_url'],
         'config': config,
         'context_warnings': context_warnings,
+        'warnings': context_warnings,
         'can_access_strategies': bool(config['current_operator_id'] and config['operator_role'] == 'RECEIVER'),
         'operator_required': config['current_operator_id'] is None
     })
@@ -3512,7 +3515,7 @@ def export_connection_configs():
     if not op:
         return jsonify({'error': '操作员不存在'}), 404
     
-    config_ids = request.args.get('ids')
+    config_ids = request.args.get('ids') or request.args.get('config_ids')
     if config_ids:
         ids = [int(x) for x in config_ids.split(',') if x.strip()]
         placeholders = ','.join(['?'] * len(ids))
@@ -3604,6 +3607,7 @@ def import_connection_configs():
         existing = db.execute('SELECT * FROM connection_configs WHERE profile_name = ?',
                              (c_data['profile_name'],)).fetchone()
         if existing:
+            enrich_connection_config(db, existing)
             conflicts.append({
                 'index': idx,
                 'import_name': c_data['profile_name'],
@@ -3615,7 +3619,28 @@ def import_connection_configs():
                 'import_port': c_data.get('service_port'),
                 'import_version': c_data.get('config_version'),
                 'local_version': existing['config_version'],
-                'default_resolution': 'KEEP_LOCAL'
+                'default_resolution': 'KEEP_LOCAL',
+                'local': {
+                    'id': existing['id'],
+                    'profile_name': existing['profile_name'],
+                    'service_host': existing['service_host'],
+                    'service_port': existing['service_port'],
+                    'entry_path': existing['entry_path'],
+                    'protocol': existing['protocol'],
+                    'config_version': existing['config_version'],
+                    'operator_name': existing.get('operator_name'),
+                    'updated_at': existing.get('updated_at'),
+                    'created_at': existing.get('created_at')
+                },
+                'imported': {
+                    'profile_name': c_data['profile_name'],
+                    'service_host': c_data.get('service_host'),
+                    'service_port': c_data.get('service_port'),
+                    'entry_path': c_data.get('entry_path', '/'),
+                    'protocol': c_data.get('protocol', 'http'),
+                    'config_version': c_data.get('config_version', 1),
+                    'current_operator_id': c_data.get('current_operator_id')
+                }
             })
         
         for other in valid_configs:

@@ -385,6 +385,112 @@ def main():
     else:
         assert_true(r.status_code == 200, f'无冲突直接导入成功 (status={r.status_code})')
 
+    header('十一b、冲突处理-OVERWRITE覆盖模式')
+
+    conflict_overwrite_name = f'覆盖测试_{ts}'
+    r = requests.post(f'{API}/connection/configs', json={
+        'profile_name': conflict_overwrite_name,
+        'service_host': '172.16.0.1',
+        'service_port': 7777,
+        'entry_path': '/old',
+        'protocol': 'http',
+        'current_operator_id': None,
+        'is_default': False,
+        'operator_id': receiver['id']
+    })
+    assert_true(r.status_code in (200, 201), '创建覆盖测试目标配置')
+
+    overwrite_import_data = {
+        'configs': [{
+            'profile_name': conflict_overwrite_name,
+            'service_host': '172.16.0.2',
+            'service_port': 8888,
+            'entry_path': '/new',
+            'protocol': 'https',
+            'config_version': 1
+        }]
+    }
+
+    r = requests.post(f'{API}/connection/import', json={
+        'configs': overwrite_import_data['configs'],
+        'operator_id': receiver['id']
+    })
+    assert_true(r.status_code == 409, '覆盖模式-冲突检测返回409')
+
+    resolutions_overwrite = {
+        '0': {
+            'mode': 'OVERWRITE'
+        }
+    }
+    r = requests.post(f'{API}/connection/import/resolve', json={
+        'configs': overwrite_import_data['configs'],
+        'operator_id': receiver['id'],
+        'resolutions': resolutions_overwrite
+    })
+    assert_true(r.status_code == 200, f'冲突解决-OVERWRITE模式 (status={r.status_code})')
+    if r.status_code == 200:
+        all_configs = requests.get(f'{API}/connection/configs').json()
+        overwritten = next((c for c in all_configs if c.get('profile_name') == conflict_overwrite_name), None)
+        assert_true(overwritten is not None, '覆盖模式-配置存在')
+        if overwritten:
+            assert_equal(overwritten['service_host'], '172.16.0.2', '覆盖模式-主机地址已更新')
+            assert_equal(overwritten['service_port'], 8888, '覆盖模式-端口已更新')
+            assert_equal(overwritten['entry_path'], '/new', '覆盖模式-入口路径已更新')
+            assert_equal(overwritten['protocol'], 'https', '覆盖模式-协议已更新')
+
+    header('十一c、冲突处理-KEEP_LOCAL保留模式')
+
+    conflict_keep_name = f'保留测试_{ts}'
+    r = requests.post(f'{API}/connection/configs', json={
+        'profile_name': conflict_keep_name,
+        'service_host': '192.168.1.1',
+        'service_port': 3333,
+        'entry_path': '/original',
+        'protocol': 'http',
+        'current_operator_id': None,
+        'is_default': False,
+        'operator_id': receiver['id']
+    })
+    assert_true(r.status_code in (200, 201), '创建保留测试目标配置')
+
+    keep_import_data = {
+        'configs': [{
+            'profile_name': conflict_keep_name,
+            'service_host': '192.168.2.2',
+            'service_port': 4444,
+            'entry_path': '/modified',
+            'protocol': 'https',
+            'config_version': 1
+        }]
+    }
+
+    r = requests.post(f'{API}/connection/import', json={
+        'configs': keep_import_data['configs'],
+        'operator_id': receiver['id']
+    })
+    assert_true(r.status_code == 409, '保留模式-冲突检测返回409')
+
+    resolutions_keep = {
+        '0': {
+            'mode': 'KEEP_LOCAL'
+        }
+    }
+    r = requests.post(f'{API}/connection/import/resolve', json={
+        'configs': keep_import_data['configs'],
+        'operator_id': receiver['id'],
+        'resolutions': resolutions_keep
+    })
+    assert_true(r.status_code == 200, f'冲突解决-KEEP_LOCAL模式 (status={r.status_code})')
+    if r.status_code == 200:
+        all_configs = requests.get(f'{API}/connection/configs').json()
+        kept = next((c for c in all_configs if c.get('profile_name') == conflict_keep_name), None)
+        assert_true(kept is not None, '保留模式-配置存在')
+        if kept:
+            assert_equal(kept['service_host'], '192.168.1.1', '保留模式-主机地址未改变')
+            assert_equal(kept['service_port'], 3333, '保留模式-端口未改变')
+            assert_equal(kept['entry_path'], '/original', '保留模式-入口路径未改变')
+            assert_equal(kept['protocol'], 'http', '保留模式-协议未改变')
+
     header('十二、重启保持测试（数据库持久化校验）')
 
     try:
@@ -473,7 +579,7 @@ def main():
 
     header('十六、配置删除')
 
-    clean_names = [no_op_name, import_name, f'{conflict_name}_另存']
+    clean_names = [no_op_name, import_name, conflict_name + '_另存', conflict_overwrite_name, conflict_keep_name]
     all_c = requests.get(f'{API}/connection/configs').json()
     for c in all_c:
         if c.get('profile_name') in clean_names:
