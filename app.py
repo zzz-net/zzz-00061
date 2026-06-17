@@ -49,6 +49,21 @@ REVIEW_STATUS_NAME = {
     'REJECTED': '已退回（需重新提报）'
 }
 
+URGENCY_LEVELS = {
+    'NORMAL': '普通',
+    'URGENT': '紧急',
+    'CRITICAL': '特急'
+}
+
+URGENCY_ORDER = ['NORMAL', 'URGENT', 'CRITICAL']
+
+REMINDER_STATUS = {
+    'PENDING': '待处理',
+    'PROCESSED': '已处理',
+    'MERGED': '已合并',
+    'CANCELLED': '已取消'
+}
+
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -171,6 +186,48 @@ def init_db():
         except sqlite3.OperationalError:
             pass
     
+    c.execute('''CREATE TABLE IF NOT EXISTS reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    expected_completion TEXT,
+                    is_escalated INTEGER NOT NULL DEFAULT 0,
+                    urgency TEXT NOT NULL DEFAULT 'NORMAL',
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    processed_by INTEGER,
+                    processed_at TIMESTAMP,
+                    process_note TEXT,
+                    merged_into INTEGER,
+                    FOREIGN KEY (review_id) REFERENCES review_items(id),
+                    FOREIGN KEY (created_by) REFERENCES users(id),
+                    FOREIGN KEY (processed_by) REFERENCES users(id),
+                    FOREIGN KEY (merged_into) REFERENCES reminders(id))''')
+    
+    for col in ['expected_completion', 'is_escalated', 'urgency', 'status',
+                'processed_by', 'processed_at', 'process_note', 'merged_into']:
+        try:
+            c.execute(f'ALTER TABLE reminders ADD COLUMN {col}')
+        except sqlite3.OperationalError:
+            pass
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS reminder_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    reminder_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    operator_id INTEGER NOT NULL,
+                    detail TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (reminder_id) REFERENCES reminders(id),
+                    FOREIGN KEY (operator_id) REFERENCES users(id))''')
+    
+    for col in ['detail']:
+        try:
+            c.execute(f'ALTER TABLE reminder_logs ADD COLUMN {col}')
+        except sqlite3.OperationalError:
+            pass
+    
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO users (username, role) VALUES (?, ?)", ('sender', 'SENDER'))
@@ -190,6 +247,23 @@ def add_history(db, batch_id, box_id, action, operator_id, operator_role, box_no
                   (batch_id, box_id, action, operator_id, operator_role, box_no, reason)
                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
                (batch_id, box_id, action, operator_id, operator_role, box_no, reason))
+
+def max_urgency(a, b):
+    ai = URGENCY_ORDER.index(a) if a in URGENCY_ORDER else 0
+    bi = URGENCY_ORDER.index(b) if b in URGENCY_ORDER else 0
+    return URGENCY_ORDER[max(ai, bi)]
+
+def enrich_reminder(db, rm):
+    rm['status_name'] = REMINDER_STATUS.get(rm['status'], rm['status'])
+    rm['urgency_name'] = URGENCY_LEVELS.get(rm['urgency'], rm['urgency'])
+    creator = db.execute('SELECT username FROM users WHERE id = ?', (rm['created_by'],)).fetchone()
+    rm['creator_name'] = creator['username'] if creator else None
+    if rm.get('processed_by'):
+        processor = db.execute('SELECT username FROM users WHERE id = ?', (rm['processed_by'],)).fetchone()
+        rm['processor_name'] = processor['username'] if processor else None
+    else:
+        rm['processor_name'] = None
+    return rm
 
 @app.route('/')
 def index():
@@ -258,6 +332,24 @@ def get_batch_detail(batch_id):
                            ORDER BY r.created_at DESC''', (batch_id,)).fetchall()
     for rv in reviews:
         rv['status_name'] = REVIEW_STATUS_NAME.get(rv['status'], rv['status'])
+        reminder_stats = db.execute('''SELECT COUNT(*) as total,
+            SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
+            SUM(CASE WHEN is_escalated = 1 AND status = 'PENDING' THEN 1 ELSE 0 END) as escalated_pending,
+            SUM(CASE WHEN status = 'PROCESSED' THEN 1 ELSE 0 END) as processed
+            FROM reminders WHERE review_id = ?''', (rv['id'],)).fetchone()
+        rv['reminder_total'] = reminder_stats['total']
+        rv['reminder_pending'] = reminder_stats['pending']
+        rv['reminder_escalated'] = reminder_stats['escalated_pending']
+        rv['reminder_processed'] = reminder_stats['processed']
+        last_reminder = db.execute('''SELECT r.*, u.username as creator_name
+            FROM reminders r JOIN users u ON r.created_by = u.id
+            WHERE r.review_id = ? AND r.status != 'MERGED' AND (r.merged_into IS NULL OR r.merged_into = 0)
+            ORDER BY r.created_at DESC LIMIT 1''', (rv['id'],)).fetchone()
+        if last_reminder:
+            rv['last_reminder_by'] = last_reminder['creator_name']
+            rv['last_reminder_at'] = last_reminder['created_at']
+            rv['last_reminder_urgency'] = last_reminder['urgency']
+            rv['last_reminder_urgency_name'] = URGENCY_LEVELS.get(last_reminder['urgency'], last_reminder['urgency'])
     
     review_summary = {}
     for bx in boxes:
@@ -642,6 +734,18 @@ def export_batch(batch_id):
     
     boxes_list = db.execute('SELECT * FROM boxes WHERE batch_id = ? ORDER BY created_at', (batch_id,)).fetchall()
     
+    all_reminders = db.execute('''SELECT rm.*, u.username as creator_name, up.username as processor_name,
+        r.issue_type, r.issue_description, bx.box_no
+        FROM reminders rm
+        JOIN users u ON rm.created_by = u.id
+        LEFT JOIN users up ON rm.processed_by = up.id
+        JOIN review_items r ON rm.review_id = r.id
+        JOIN boxes bx ON r.box_id = bx.id
+        WHERE r.batch_id = ? AND (rm.merged_into IS NULL OR rm.merged_into = 0)
+        ORDER BY rm.created_at''', (batch_id,)).fetchall()
+    total_reminders = len(all_reminders)
+    pending_reminders = len([r for r in all_reminders if r['status'] == 'PENDING'])
+    
     output = io.StringIO()
     writer = csv.writer(output)
     
@@ -656,6 +760,7 @@ def export_batch(batch_id):
     open_reviews = len([r for r in reviews if r['status'] in ('OPEN', 'IN_PROGRESS', 'PENDING_CLOSE', 'REJECTED')])
     closed_reviews = len([r for r in reviews if r['status'] == 'CLOSED'])
     writer.writerow([f'复核项统计: 共{total_reviews}项, 待处理{open_reviews}项, 已关闭{closed_reviews}项'])
+    writer.writerow([f'催办统计: 共{total_reminders}条, 待处理{pending_reminders}条'])
     
     writer.writerow([])
     writer.writerow(['档案详情'])
@@ -706,6 +811,29 @@ def export_batch(batch_id):
                 r['created_at'],
                 r['closer_name'] or '',
                 r['closed_at'] or ''
+            ])
+    
+    if all_reminders:
+        writer.writerow([])
+        writer.writerow(['催办摘要'])
+        writer.writerow(['催办ID', '复核项ID', '盒号', '问题类型', '催办原因', '紧急程度', '是否升级',
+                         '期望完成时间', '状态', '催办人', '催办时间', '处理人', '处理时间', '处理备注'])
+        for rm in all_reminders:
+            writer.writerow([
+                rm['id'],
+                rm['review_id'],
+                rm['box_no'],
+                rm['issue_type'],
+                rm['reason'],
+                URGENCY_LEVELS.get(rm['urgency'], rm['urgency']),
+                '是' if rm['is_escalated'] else '否',
+                rm['expected_completion'] or '',
+                REMINDER_STATUS.get(rm['status'], rm['status']),
+                rm['creator_name'],
+                rm['created_at'],
+                rm['processor_name'] or '',
+                rm['processed_at'] or '',
+                rm['process_note'] or ''
             ])
     
     writer.writerow([])
@@ -948,6 +1076,15 @@ def reject_review(review_id):
                box_no=box['box_no'] if box else None,
                reason=f'复核项#{review_id} 状态更新: {old_status_name} → 已退回 | 退回原因: {reason}')
     
+    db.execute('''UPDATE reminders SET status = 'PENDING', process_note = NULL, processed_by = NULL, processed_at = NULL
+                  WHERE review_id = ? AND status = 'PROCESSED' AND (merged_into IS NULL OR merged_into = 0)''', (review_id,))
+    reverted_reminders = db.execute('''SELECT id FROM reminders 
+                                       WHERE review_id = ? AND status = 'PENDING' AND (merged_into IS NULL OR merged_into = 0)''',
+                                    (review_id,)).fetchall()
+    for rv_rm in reverted_reminders:
+        db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
+                      VALUES (?, ?, ?, ?)''', (rv_rm['id'], '恢复催办', operator_id, '复核项退回，已处理催办恢复为待处理'))
+    
     db.commit()
     
     review = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
@@ -992,6 +1129,14 @@ def close_review(review_id):
     add_history(db, review['batch_id'], review['box_id'], '关闭复核项', operator_id, operator['role'],
                box_no=box['box_no'] if box else None,
                reason=f'复核项#{review_id} 状态更新: {old_status_name} → 已关闭')
+    
+    cancelled_reminders = db.execute('''SELECT id FROM reminders 
+                                        WHERE review_id = ? AND status = 'PENDING' AND (merged_into IS NULL OR merged_into = 0)''',
+                                     (review_id,)).fetchall()
+    db.execute("UPDATE reminders SET status = 'CANCELLED' WHERE review_id = ? AND status = 'PENDING'", (review_id,))
+    for cr in cancelled_reminders:
+        db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
+                      VALUES (?, ?, ?, ?)''', (cr['id'], '取消催办', operator_id, '复核项关闭，催办自动取消'))
     
     db.commit()
     
@@ -1042,6 +1187,16 @@ def reopen_review(review_id):
                box_no=box['box_no'] if box else None,
                reason=f'复核项#{review_id} 状态更新: {old_status_name} → 待处理 | 撤销原因: {reason}')
     
+    db.execute('''UPDATE reminders SET status = 'PENDING', process_note = NULL, processed_by = NULL, processed_at = NULL
+                  WHERE review_id = ? AND status = 'CANCELLED' AND (merged_into IS NULL OR merged_into = 0)''', (review_id,))
+    restored_reminders = db.execute('''SELECT id FROM reminders 
+                                       WHERE review_id = ? AND status = 'PENDING' AND (merged_into IS NULL OR merged_into = 0)
+                                       AND created_at = (SELECT MAX(created_at) FROM reminders r2 WHERE r2.review_id = ?)''',
+                                    (review_id, review_id)).fetchall()
+    for rr in restored_reminders:
+        db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
+                      VALUES (?, ?, ?, ?)''', (rr['id'], '恢复催办', operator_id, '复核项重开，催办自动恢复'))
+    
     db.commit()
     
     review = db.execute('''SELECT r.*, bx.box_no, u.username as creator_name,
@@ -1053,6 +1208,272 @@ def reopen_review(review_id):
                           WHERE r.id = ?''', (review_id,)).fetchone()
     review['status_name'] = REVIEW_STATUS_NAME.get(review['status'], review['status'])
     return jsonify(review)
+
+@app.route('/api/reviews/<int:review_id>/reminders', methods=['POST'])
+def create_reminder(review_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (review_id,)).fetchone()
+    if not review:
+        return jsonify({'error': '复核项不存在'}), 404
+    
+    operator_id = data.get('created_by')
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'RECEIVER':
+        return jsonify({'error': '只有接收方才能发起催办'}), 400
+    
+    if review['status'] not in ('OPEN', 'IN_PROGRESS', 'REJECTED'):
+        return jsonify({'error': f'当前复核项状态（{REVIEW_STATUS_NAME.get(review["status"])}）不允许发起催办'}), 400
+    
+    reason = data.get('reason', '').strip()
+    if not reason:
+        return jsonify({'error': '催办原因不能为空'}), 400
+    
+    expected_completion = data.get('expected_completion')
+    is_escalated = 1 if data.get('is_escalated', False) else 0
+    urgency = data.get('urgency', 'NORMAL')
+    if urgency not in URGENCY_ORDER:
+        urgency = 'NORMAL'
+    
+    existing = db.execute('''SELECT * FROM reminders 
+                             WHERE review_id = ? AND status = 'PENDING' AND merged_into IS NULL
+                             LIMIT 1''', (review_id,)).fetchone()
+    
+    if existing:
+        new_reason = existing['reason'] + '; ' + reason
+        new_urgency = max_urgency(existing['urgency'], urgency)
+        new_is_escalated = max(existing['is_escalated'], is_escalated)
+        new_expected = existing['expected_completion']
+        if expected_completion:
+            if not new_expected or expected_completion > new_expected:
+                new_expected = expected_completion
+        
+        db.execute('''UPDATE reminders SET reason = ?, expected_completion = ?, 
+                      urgency = ?, is_escalated = ? WHERE id = ?''',
+                   (new_reason, new_expected, new_urgency, new_is_escalated, existing['id']))
+        
+        db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
+                      VALUES (?, ?, ?, ?)''',
+                   (existing['id'], '合并催办', operator_id,
+                    f'合并催办: 原因追加"{reason}", 紧急程度升级为{new_urgency}'))
+        
+        merged = db.execute('SELECT * FROM reminders WHERE id = ?', (existing['id'],)).fetchone()
+        enrich_reminder(db, merged)
+        db.commit()
+        return jsonify(merged), 200
+    
+    cursor = db.execute('''INSERT INTO reminders 
+                           (review_id, reason, expected_completion, is_escalated, urgency, status, created_by)
+                           VALUES (?, ?, ?, ?, ?, 'PENDING', ?)''',
+                        (review_id, reason, expected_completion, is_escalated, urgency, operator_id))
+    reminder_id = cursor.lastrowid
+    
+    db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
+                  VALUES (?, ?, ?, ?)''',
+               (reminder_id, '发起催办', operator_id,
+                f'发起催办: {reason}, 紧急程度: {URGENCY_LEVELS.get(urgency, urgency)}'
+                + (f', 期望完成: {expected_completion}' if expected_completion else '')))
+    
+    box = db.execute('SELECT * FROM boxes WHERE id = ?', (review['box_id'],)).fetchone()
+    add_history(db, review['batch_id'], review['box_id'], '发起催办', operator_id, operator['role'],
+               box_no=box['box_no'] if box else None,
+               reason=f'复核项#{review_id} 催办: {reason}')
+    
+    db.commit()
+    
+    reminder = db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)).fetchone()
+    enrich_reminder(db, reminder)
+    return jsonify(reminder), 201
+
+@app.route('/api/reviews/<int:review_id>/reminders', methods=['GET'])
+def get_review_reminders(review_id):
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (review_id,)).fetchone()
+    if not review:
+        return jsonify({'error': '复核项不存在'}), 404
+    
+    reminders = db.execute('''SELECT * FROM reminders 
+                              WHERE review_id = ? AND (merged_into IS NULL OR merged_into = 0)
+                              ORDER BY created_at DESC''', (review_id,)).fetchall()
+    for rm in reminders:
+        enrich_reminder(db, rm)
+    return jsonify(reminders)
+
+@app.route('/api/reminders/pending', methods=['GET'])
+def get_pending_reminders():
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    operator_id = request.args.get('operator_id', type=int)
+    urgency_filter = request.args.get('urgency_filter')
+    
+    if not operator_id:
+        return jsonify({'error': '缺少operator_id参数'}), 400
+    
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    query = '''SELECT rm.*, r.issue_type, r.issue_description, r.batch_id, r.status as review_status,
+               bx.box_no
+               FROM reminders rm
+               JOIN review_items r ON rm.review_id = r.id
+               JOIN boxes bx ON r.box_id = bx.id
+               WHERE rm.status = 'PENDING' AND (rm.merged_into IS NULL OR rm.merged_into = 0)'''
+    params = []
+    
+    if operator['role'] == 'RECEIVER':
+        query += ' AND rm.created_by = ?'
+        params.append(operator_id)
+    
+    if urgency_filter and urgency_filter in URGENCY_ORDER:
+        query += ' AND rm.urgency = ?'
+        params.append(urgency_filter)
+    
+    query += ' ORDER BY CASE rm.urgency WHEN \'CRITICAL\' THEN 0 WHEN \'URGENT\' THEN 1 ELSE 2 END, rm.created_at DESC'
+    
+    reminders = db.execute(query, params).fetchall()
+    for rm in reminders:
+        enrich_reminder(db, rm)
+    
+    grouped = {}
+    for level in ['CRITICAL', 'URGENT', 'NORMAL']:
+        items = [rm for rm in reminders if rm['urgency'] == level]
+        if items:
+            grouped[level] = items
+    
+    sorted_grouped = {}
+    for level in ['CRITICAL', 'URGENT', 'NORMAL']:
+        if level in grouped:
+            sorted_grouped[level] = grouped[level]
+    
+    response = app.response_class(
+        response=json.dumps(sorted_grouped, ensure_ascii=False),
+        status=200,
+        mimetype='application/json'
+    )
+    return response
+
+@app.route('/api/reminders/<int:reminder_id>/process', methods=['POST'])
+def process_reminder(reminder_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    reminder = db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)).fetchone()
+    if not reminder:
+        return jsonify({'error': '催办不存在'}), 404
+    
+    operator_id = data.get('operator_id')
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'SENDER':
+        return jsonify({'error': '只有发送方才能处理催办'}), 400
+    
+    if reminder['status'] != 'PENDING':
+        return jsonify({'error': f'当前催办状态（{REMINDER_STATUS.get(reminder["status"], reminder["status"])}）不允许处理'}), 400
+    
+    process_note = data.get('process_note', '').strip()
+    if not process_note:
+        return jsonify({'error': '处理备注不能为空'}), 400
+    
+    db.execute('''UPDATE reminders SET status = 'PROCESSED', processed_by = ?, 
+                  processed_at = CURRENT_TIMESTAMP, process_note = ? WHERE id = ?''',
+               (operator_id, process_note, reminder_id))
+    
+    db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
+                  VALUES (?, ?, ?, ?)''',
+               (reminder_id, '处理催办', operator_id, f'处理备注: {process_note}'))
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (reminder['review_id'],)).fetchone()
+    box = db.execute('SELECT * FROM boxes WHERE id = ?', (review['box_id'],)).fetchone()
+    add_history(db, review['batch_id'], review['box_id'], '处理催办', operator_id, operator['role'],
+               box_no=box['box_no'] if box else None,
+               reason=f'催办#{reminder_id} 处理备注: {process_note}')
+    
+    db.commit()
+    
+    reminder = db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)).fetchone()
+    enrich_reminder(db, reminder)
+    return jsonify(reminder)
+
+@app.route('/api/reminders/<int:reminder_id>/revoke-escalation', methods=['POST'])
+def revoke_escalation(reminder_id):
+    data = request.json
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    reminder = db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)).fetchone()
+    if not reminder:
+        return jsonify({'error': '催办不存在'}), 404
+    
+    operator_id = data.get('operator_id')
+    operator = db.execute('SELECT * FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not operator:
+        return jsonify({'error': '操作员不存在'}), 404
+    
+    if operator['role'] != 'RECEIVER':
+        return jsonify({'error': '只有接收方才能撤销升级'}), 400
+    
+    if not reminder['is_escalated']:
+        return jsonify({'error': '该催办未升级，无需撤销'}), 400
+    
+    new_urgency = reminder['urgency']
+    if reminder['status'] == 'PENDING' and reminder['urgency'] == 'CRITICAL':
+        new_urgency = 'URGENT'
+    
+    db.execute('''UPDATE reminders SET is_escalated = 0, urgency = ? WHERE id = ?''',
+               (new_urgency, reminder_id))
+    
+    db.execute('''INSERT INTO reminder_logs (reminder_id, action, operator_id, detail)
+                  VALUES (?, ?, ?, ?)''',
+               (reminder_id, '撤销升级', operator_id,
+                f'撤销升级, 紧急程度调整为{URGENCY_LEVELS.get(new_urgency, new_urgency)}'))
+    
+    review = db.execute('SELECT * FROM review_items WHERE id = ?', (reminder['review_id'],)).fetchone()
+    box = db.execute('SELECT * FROM boxes WHERE id = ?', (review['box_id'],)).fetchone()
+    add_history(db, review['batch_id'], review['box_id'], '撤销升级', operator_id, operator['role'],
+               box_no=box['box_no'] if box else None,
+               reason=f'催办#{reminder_id} 撤销升级')
+    
+    db.commit()
+    
+    reminder = db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)).fetchone()
+    enrich_reminder(db, reminder)
+    return jsonify(reminder)
+
+@app.route('/api/reminders/stats', methods=['GET'])
+def get_reminder_stats():
+    db = get_db()
+    db.row_factory = dict_factory
+    
+    total_pending = db.execute('''SELECT COUNT(*) as cnt FROM reminders 
+                                  WHERE status = 'PENDING' AND (merged_into IS NULL OR merged_into = 0)''').fetchone()['cnt']
+    
+    by_urgency = {}
+    for level in URGENCY_ORDER:
+        cnt = db.execute('''SELECT COUNT(*) as cnt FROM reminders 
+                            WHERE status = 'PENDING' AND urgency = ? AND (merged_into IS NULL OR merged_into = 0)''',
+                         (level,)).fetchone()['cnt']
+        by_urgency[level] = cnt
+    
+    processed_today = db.execute('''SELECT COUNT(*) as cnt FROM reminders 
+                                    WHERE status = 'PROCESSED' AND DATE(processed_at) = DATE('now')''').fetchone()['cnt']
+    
+    return jsonify({
+        'total_pending': total_pending,
+        'by_urgency': by_urgency,
+        'processed_today': processed_today
+    })
 
 if __name__ == '__main__':
     init_db()

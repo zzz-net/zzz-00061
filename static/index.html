@@ -117,6 +117,23 @@ tr:hover { background: #f8f9fa; }
 .review-field label { font-weight: 500; color: #666; }
 .review-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .review-tip { background: #fff8e1; padding: 10px 14px; border-radius: 6px; font-size: 13px; color: #795548; margin-bottom: 12px; border-left: 4px solid #ffc107; }
+.reminder-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.reminder-badge.pending { background: #fff3e0; color: #e65100; }
+.reminder-badge.escalated { background: #ffebee; color: #c62828; }
+.reminder-badge.processed { background: #e8f5e9; color: #2e7d32; }
+.urgency-tag { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.urgency-NORMAL { background: #e8f5e9; color: #2e7d32; }
+.urgency-URGENT { background: #fff3e0; color: #e65100; }
+.urgency-CRITICAL { background: #ffebee; color: #c62828; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+.reminder-card { border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; margin-bottom: 8px; background: #fafbfc; }
+.reminder-card.escalated { border-left: 4px solid #c62828; background: #fff8f8; }
+.reminder-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.reminder-meta { font-size: 12px; color: #888; }
+.urgency-group { margin-bottom: 20px; }
+.urgency-group-title { font-weight: 600; font-size: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.reminder-process-note { background: #e3f2fd; padding: 8px 10px; border-radius: 6px; margin-top: 6px; font-size: 13px; }
+.tab-badge { background: #e53935; color: white; border-radius: 10px; padding: 1px 7px; font-size: 11px; margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -142,14 +159,18 @@ tr:hover { background: #f8f9fa; }
 
     <template v-if="!selectedBatchId">
       <div class="tabs">
-        <button :class="['tab', {active: activeTab === 'list'}]" @click="activeTab = 'list'">批次列表</button>
-        <button :class="['tab', {active: activeTab === 'register'}]" @click="activeTab = 'register'">登记新批次</button>
+        <button :class="['tab', {active: activeTopTab === 'batches'}]" @click="activeTopTab = 'batches'">批次列表</button>
+        <button :class="['tab', {active: activeTopTab === 'register'}]" @click="activeTopTab = 'register'">登记新批次</button>
+        <button :class="['tab', {active: activeTopTab === 'reminders'}]" @click="activeTopTab = 'reminders'; loadPendingReminders(); loadReminderStats()">
+          催办待办
+          <span v-if="reminderStats.total_pending > 0" class="tab-badge">{{ reminderStats.total_pending }}</span>
+        </button>
       </div>
 
-      <div v-if="activeTab === 'list'" class="card">
+      <div v-if="activeTopTab === 'batches'" class="card">
         <div class="card-title">
           <span>所有批次</span>
-          <button class="btn btn-primary" @click="activeTab = 'register'">+ 登记新批次</button>
+          <button class="btn btn-primary" @click="activeTopTab = 'register'">+ 登记新批次</button>
         </div>
         <div v-if="batches.length === 0" class="empty-state">
           <div class="icon">📋</div>
@@ -183,7 +204,7 @@ tr:hover { background: #f8f9fa; }
         </table>
       </div>
 
-      <div v-if="activeTab === 'register'" class="card">
+      <div v-if="activeTopTab === 'register'" class="card">
         <div class="card-title">登记新批次</div>
         <div class="form-row">
           <div class="form-group">
@@ -210,6 +231,108 @@ tr:hover { background: #f8f9fa; }
 
         <div style="text-align: right;">
           <button class="btn btn-primary" @click="registerBatch" :disabled="!canRegister">登记批次</button>
+        </div>
+      </div>
+
+      <div v-if="activeTopTab === 'reminders'" class="card">
+        <div class="card-title">
+          <span>🔔 催办待办</span>
+          <span class="review-summary-badge">
+            待处理{{ reminderStats.total_pending }}
+            <span style="color:#c62828;">特急{{ reminderStats.critical }}</span>
+            <span style="color:#e65100;">紧急{{ reminderStats.urgent }}</span>
+            <span style="color:#2e7d32;">普通{{ reminderStats.normal }}</span>
+            今日已处理{{ reminderStats.processed_today }}
+          </span>
+        </div>
+
+        <div v-if="!pendingReminders.CRITICAL?.length && !pendingReminders.URGENT?.length && !pendingReminders.NORMAL?.length" class="empty-state">
+          <div class="icon">🎉</div>
+          <div>暂无待处理催办</div>
+        </div>
+
+        <div v-if="pendingReminders.CRITICAL?.length" class="urgency-group">
+          <div class="urgency-group-title" style="color: #c62828;">
+            <span class="urgency-tag urgency-CRITICAL">特急</span>
+            {{ pendingReminders.CRITICAL.length }}条
+          </div>
+          <div v-for="rm in pendingReminders.CRITICAL" :key="rm.id" :class="['reminder-card', {escalated: rm.is_escalated}]">
+            <div class="reminder-card-header">
+              <div>
+                <span :class="['urgency-tag', 'urgency-' + rm.urgency]">{{ rm.urgency === 'CRITICAL' ? '特急' : rm.urgency === 'URGENT' ? '紧急' : '普通' }}</span>
+                <span v-if="rm.is_escalated" class="reminder-badge escalated">已升级</span>
+                <span style="font-weight: 500; margin-left: 8px;">复核项#{{ rm.review_id }}</span>
+              </div>
+              <span class="reminder-meta">{{ rm.created_at }}</span>
+            </div>
+            <div style="font-size: 14px; margin-bottom: 4px;">{{ rm.reason }}</div>
+            <div class="reminder-meta">
+              发起人: {{ rm.creator_name }}
+              <span v-if="rm.expected_completion"> | 期望完成: {{ rm.expected_completion }}</span>
+              <span v-if="rm.batch_no"> | 批次: {{ rm.batch_no }}</span>
+              <span v-if="rm.box_no"> | 盒号: {{ rm.box_no }}</span>
+            </div>
+            <div style="margin-top: 8px; display: flex; gap: 8px;">
+              <button v-if="currentUser?.role === 'SENDER'" class="btn btn-primary btn-sm" @click="openProcessReminderModal(rm)">处理</button>
+              <button v-if="currentUser?.role === 'RECEIVER' && rm.is_escalated" class="btn btn-warning btn-sm" @click="revokeEscalation(rm.id)">撤销升级</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="pendingReminders.URGENT?.length" class="urgency-group">
+          <div class="urgency-group-title" style="color: #e65100;">
+            <span class="urgency-tag urgency-URGENT">紧急</span>
+            {{ pendingReminders.URGENT.length }}条
+          </div>
+          <div v-for="rm in pendingReminders.URGENT" :key="rm.id" :class="['reminder-card', {escalated: rm.is_escalated}]">
+            <div class="reminder-card-header">
+              <div>
+                <span :class="['urgency-tag', 'urgency-' + rm.urgency]">{{ rm.urgency === 'CRITICAL' ? '特急' : rm.urgency === 'URGENT' ? '紧急' : '普通' }}</span>
+                <span v-if="rm.is_escalated" class="reminder-badge escalated">已升级</span>
+                <span style="font-weight: 500; margin-left: 8px;">复核项#{{ rm.review_id }}</span>
+              </div>
+              <span class="reminder-meta">{{ rm.created_at }}</span>
+            </div>
+            <div style="font-size: 14px; margin-bottom: 4px;">{{ rm.reason }}</div>
+            <div class="reminder-meta">
+              发起人: {{ rm.creator_name }}
+              <span v-if="rm.expected_completion"> | 期望完成: {{ rm.expected_completion }}</span>
+              <span v-if="rm.batch_no"> | 批次: {{ rm.batch_no }}</span>
+              <span v-if="rm.box_no"> | 盒号: {{ rm.box_no }}</span>
+            </div>
+            <div style="margin-top: 8px; display: flex; gap: 8px;">
+              <button v-if="currentUser?.role === 'SENDER'" class="btn btn-primary btn-sm" @click="openProcessReminderModal(rm)">处理</button>
+              <button v-if="currentUser?.role === 'RECEIVER' && rm.is_escalated" class="btn btn-warning btn-sm" @click="revokeEscalation(rm.id)">撤销升级</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="pendingReminders.NORMAL?.length" class="urgency-group">
+          <div class="urgency-group-title" style="color: #2e7d32;">
+            <span class="urgency-tag urgency-NORMAL">普通</span>
+            {{ pendingReminders.NORMAL.length }}条
+          </div>
+          <div v-for="rm in pendingReminders.NORMAL" :key="rm.id" :class="['reminder-card', {escalated: rm.is_escalated}]">
+            <div class="reminder-card-header">
+              <div>
+                <span :class="['urgency-tag', 'urgency-' + rm.urgency]">{{ rm.urgency === 'CRITICAL' ? '特急' : rm.urgency === 'URGENT' ? '紧急' : '普通' }}</span>
+                <span v-if="rm.is_escalated" class="reminder-badge escalated">已升级</span>
+                <span style="font-weight: 500; margin-left: 8px;">复核项#{{ rm.review_id }}</span>
+              </div>
+              <span class="reminder-meta">{{ rm.created_at }}</span>
+            </div>
+            <div style="font-size: 14px; margin-bottom: 4px;">{{ rm.reason }}</div>
+            <div class="reminder-meta">
+              发起人: {{ rm.creator_name }}
+              <span v-if="rm.expected_completion"> | 期望完成: {{ rm.expected_completion }}</span>
+              <span v-if="rm.batch_no"> | 批次: {{ rm.batch_no }}</span>
+              <span v-if="rm.box_no"> | 盒号: {{ rm.box_no }}</span>
+            </div>
+            <div style="margin-top: 8px; display: flex; gap: 8px;">
+              <button v-if="currentUser?.role === 'SENDER'" class="btn btn-primary btn-sm" @click="openProcessReminderModal(rm)">处理</button>
+              <button v-if="currentUser?.role === 'RECEIVER' && rm.is_escalated" class="btn btn-warning btn-sm" @click="revokeEscalation(rm.id)">撤销升级</button>
+            </div>
+          </div>
         </div>
       </div>
     </template>
@@ -441,37 +564,53 @@ tr:hover { background: #f8f9fa; }
             <div v-if="rv.handling_note" class="review-field" style="background: #e3f2fd; padding: 8px 10px; border-radius: 6px;">
               <label>处理说明：</label>{{ rv.handling_note }}
             </div>
+            <div v-if="rv.reminder_total > 0" style="margin-top: 8px; font-size: 13px; color: #555;">
+              <span class="reminder-badge pending">催办: {{ rv.reminder_total }}条(待处理{{ rv.reminder_pending }}, 已处理{{ rv.reminder_processed }})</span>
+              <span v-if="rv.reminder_latest_urgency" style="margin-left: 6px;">
+                最近催办: {{ rv.reminder_latest_creator }}
+                <span :class="['urgency-tag', 'urgency-' + rv.reminder_latest_urgency]" style="font-size: 11px; padding: 1px 6px;">
+                  {{ rv.reminder_latest_urgency === 'CRITICAL' ? '特急' : rv.reminder_latest_urgency === 'URGENT' ? '紧急' : '普通' }}
+                </span>
+              </span>
+              <span v-if="rv.reminder_escalated > 0" class="reminder-badge escalated" style="margin-left: 6px;">已升级{{ rv.reminder_escalated }}条</span>
+            </div>
           </div>
           <div class="review-actions">
             <template v-if="currentUser?.role === 'SENDER'">
-              <button v-if="rv.status !== 'CLOSED'" 
-                      class="btn btn-primary btn-sm" 
+              <button v-if="rv.status !== 'CLOSED'"
+                      class="btn btn-primary btn-sm"
                       @click="openUpdateReviewModal(rv)">
                 ✏️ 更新处理结果
               </button>
-              <button v-if="rv.status !== 'CLOSED' && rv.status !== 'PENDING_CLOSE'" 
-                      class="btn btn-success btn-sm" 
+              <button v-if="rv.status !== 'CLOSED' && rv.status !== 'PENDING_CLOSE'"
+                      class="btn btn-success btn-sm"
                       @click="applyForClose(rv)">
                 ✅ 申请关闭
               </button>
             </template>
             <template v-if="currentUser?.role === 'RECEIVER'">
-              <button v-if="rv.status === 'PENDING_CLOSE'" 
-                      class="btn btn-success btn-sm" 
+              <button v-if="rv.status === 'PENDING_CLOSE'"
+                      class="btn btn-success btn-sm"
                       @click="confirmCloseReview(rv)">
                 ✓ 确认关闭
               </button>
-              <button v-if="rv.status !== 'CLOSED'" 
-                      class="btn btn-danger btn-sm" 
+              <button v-if="rv.status !== 'CLOSED'"
+                      class="btn btn-danger btn-sm"
                       @click="openRejectReviewModal(rv)">
                 ✗ 退回（不认可处理）
               </button>
-              <button v-if="rv.status === 'CLOSED'" 
-                      class="btn btn-warning btn-sm" 
+              <button v-if="rv.status === 'CLOSED'"
+                      class="btn btn-warning btn-sm"
                       @click="openReopenReviewModal(rv)">
                 ↩ 撤销重开
               </button>
+              <button v-if="rv.status === 'OPEN' || rv.status === 'IN_PROGRESS' || rv.status === 'REJECTED'"
+                      class="btn btn-warning btn-sm"
+                      @click="openReminderModal(rv)">
+                🔔 催办
+              </button>
             </template>
+            <button v-if="rv.reminder_total > 0" class="btn btn-secondary btn-sm" @click="openReminderListModal(rv)">📋 查看催办记录</button>
           </div>
         </div>
       </div>
@@ -665,6 +804,106 @@ tr:hover { background: #f8f9fa; }
         </div>
       </div>
     </div>
+
+    <div v-if="showReminderModal" class="modal-overlay" @click.self="showReminderModal = false">
+      <div class="modal">
+        <h3>🔔 发起催办（接收方操作）</h3>
+        <div style="margin-bottom: 16px; padding: 12px; background: #f5f7fa; border-radius: 6px;">
+          <div style="font-weight: 500; margin-bottom: 6px;">
+            复核项#{{ editingReview?.id }} - 【{{ editingReview?.issue_type }}】（{{ editingReview?.box_no }}）
+          </div>
+          <div style="color: #666; font-size: 13px;">问题描述：{{ editingReview?.issue_description }}</div>
+        </div>
+        <div class="form-group">
+          <label>催办原因 *</label>
+          <textarea v-model="newReminder.reason" placeholder="请说明催办原因" rows="3"></textarea>
+        </div>
+        <div class="form-group">
+          <label>期望完成时间（可选）</label>
+          <input v-model="newReminder.expected_completion" type="date">
+        </div>
+        <div class="form-group">
+          <label>紧急程度</label>
+          <select v-model="newReminder.urgency">
+            <option value="NORMAL">普通</option>
+            <option value="URGENT">紧急</option>
+            <option value="CRITICAL">特急</option>
+          </select>
+        </div>
+        <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" v-model="newReminder.is_escalated" style="width: 18px; height: 18px;">
+          <label style="margin-bottom: 0;">是否升级</label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showReminderModal = false">取消</button>
+          <button class="btn btn-warning" @click="createReminder(reminderReviewId)" :disabled="!newReminder.reason.trim()">发起催办</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showProcessReminderModal" class="modal-overlay" @click.self="showProcessReminderModal = false">
+      <div class="modal">
+        <h3>处理催办（发送方操作）</h3>
+        <div style="margin-bottom: 16px; padding: 12px; background: #f5f7fa; border-radius: 6px;">
+          <div style="font-weight: 500; margin-bottom: 6px;">
+            复核项#{{ editingReminder?.review_id }}
+            <span :class="['urgency-tag', 'urgency-' + editingReminder?.urgency]" style="font-size: 11px; padding: 1px 6px; margin-left: 6px;">
+              {{ editingReminder?.urgency === 'CRITICAL' ? '特急' : editingReminder?.urgency === 'URGENT' ? '紧急' : '普通' }}
+            </span>
+            <span v-if="editingReminder?.is_escalated" class="reminder-badge escalated" style="margin-left: 6px;">已升级</span>
+          </div>
+          <div style="color: #666; font-size: 13px;">催办原因：{{ editingReminder?.reason }}</div>
+          <div v-if="editingReminder?.expected_completion" style="color: #666; font-size: 13px; margin-top: 4px;">期望完成：{{ editingReminder.expected_completion }}</div>
+        </div>
+        <div class="form-group">
+          <label>处理备注 *</label>
+          <textarea v-model="processReminderNote" placeholder="请填写处理备注" rows="4"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showProcessReminderModal = false">取消</button>
+          <button class="btn btn-primary" @click="processReminder(editingReminder?.id)" :disabled="!processReminderNote.trim()">确认处理</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showReminderListModal" class="modal-overlay" @click.self="showReminderListModal = false">
+      <div class="modal" style="max-width: 600px;">
+        <h3>📋 催办记录 - 复核项#{{ reminderReviewId }}</h3>
+        <div v-if="reviewReminders.length === 0" style="color: #999; text-align: center; padding: 20px;">
+          暂无催办记录
+        </div>
+        <div v-else>
+          <div v-for="rm in reviewReminders" :key="rm.id" :class="['reminder-card', {escalated: rm.is_escalated}]">
+            <div class="reminder-card-header">
+              <div>
+                <span :class="['urgency-tag', 'urgency-' + rm.urgency]">{{ rm.urgency === 'CRITICAL' ? '特急' : rm.urgency === 'URGENT' ? '紧急' : '普通' }}</span>
+                <span :class="['reminder-badge', rm.status === 'PENDING' ? 'pending' : rm.status === 'ESCALATED' ? 'escalated' : 'processed']" style="margin-left: 6px;">
+                  {{ rm.status === 'PENDING' ? '待处理' : rm.status === 'ESCALATED' ? '已升级' : '已处理' }}
+                </span>
+              </div>
+              <span class="reminder-meta">{{ rm.created_at }}</span>
+            </div>
+            <div style="font-size: 14px; margin-bottom: 4px;">{{ rm.reason }}</div>
+            <div class="reminder-meta">
+              发起人: {{ rm.creator_name }}
+              <span v-if="rm.expected_completion"> | 期望完成: {{ rm.expected_completion }}</span>
+              <span v-if="rm.is_escalated"> | 已升级</span>
+            </div>
+            <div v-if="rm.process_note" class="reminder-process-note">
+              <strong>处理备注：</strong>{{ rm.process_note }}
+              <span v-if="rm.processed_by_name">（{{ rm.processed_by_name }} {{ rm.processed_at }}）</span>
+            </div>
+            <div style="margin-top: 8px; display: flex; gap: 8px;">
+              <button v-if="currentUser?.role === 'SENDER' && rm.status === 'PENDING'" class="btn btn-primary btn-sm" @click="openProcessReminderModal(rm); showReminderListModal = false">处理</button>
+              <button v-if="currentUser?.role === 'RECEIVER' && rm.is_escalated && rm.status !== 'PROCESSED'" class="btn btn-warning btn-sm" @click="revokeEscalation(rm.id)">撤销升级</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showReminderListModal = false">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -680,7 +919,7 @@ createApp({
     const selectedBatchId = ref(null);
     const batchDetail = ref(null);
     const exportRecords = ref([]);
-    const activeTab = ref('list');
+    const activeTopTab = ref('batches');
     const alert = ref(null);
     
     const newBatch = ref({
@@ -717,6 +956,17 @@ createApp({
     });
     const rejectReviewReason = ref('');
     const reopenReviewReason = ref('');
+
+    const showReminderModal = ref(false);
+    const showProcessReminderModal = ref(false);
+    const showReminderListModal = ref(false);
+    const reminderReviewId = ref(null);
+    const editingReminder = ref(null);
+    const newReminder = ref({ reason: '', expected_completion: '', urgency: 'NORMAL', is_escalated: false });
+    const processReminderNote = ref('');
+    const pendingReminders = ref({ CRITICAL: [], URGENT: [], NORMAL: [] });
+    const reminderStats = ref({ total_pending: 0, critical: 0, urgent: 0, normal: 0, processed_today: 0 });
+    const reviewReminders = ref([]);
 
     const currentUser = computed(() => users.value.find(u => u.id === currentUserId.value));
     
@@ -805,7 +1055,7 @@ createApp({
       if (res.ok) {
         showAlert('批次登记成功！');
         newBatch.value = { batch_no: '', description: '', archives: [{ archive_no: '', title: '', remark: '' }] };
-        activeTab.value = 'list';
+        activeTopTab.value = 'batches';
         loadBatches();
       } else {
         showAlert(result.error || '登记失败', 'error');
@@ -1131,6 +1381,109 @@ createApp({
       }
     }
 
+    async function createReminder(reviewId) {
+      const res = await fetch(`${API}/reviews/${reviewId}/reminders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reason: newReminder.value.reason,
+          expected_completion: newReminder.value.expected_completion || null,
+          urgency: newReminder.value.urgency,
+          is_escalated: newReminder.value.is_escalated,
+          operator_id: currentUserId.value
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        const action = result.merged ? '催办已合并到已有记录' : '催办发起成功';
+        showAlert(action + '！');
+        showReminderModal.value = false;
+        viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '催办发起失败', 'error');
+      }
+    }
+
+    async function loadPendingReminders() {
+      const res = await fetch(`${API}/reminders/pending?operator_id=${currentUserId.value}`);
+      if (res.ok) {
+        pendingReminders.value = await res.json();
+      }
+    }
+
+    async function loadReminderStats() {
+      const res = await fetch(`${API}/reminders/stats`);
+      if (res.ok) {
+        reminderStats.value = await res.json();
+      }
+    }
+
+    async function processReminder(reminderId) {
+      const res = await fetch(`${API}/reminders/${reminderId}/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operator_id: currentUserId.value,
+          process_note: processReminderNote.value
+        })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('催办处理完成！');
+        showProcessReminderModal.value = false;
+        loadPendingReminders();
+        loadReminderStats();
+        if (selectedBatchId.value) viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '处理失败', 'error');
+      }
+    }
+
+    async function revokeEscalation(reminderId) {
+      if (!confirm('确定要撤销最近一次升级吗？')) return;
+      const res = await fetch(`${API}/reminders/${reminderId}/revoke-escalation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator_id: currentUserId.value })
+      });
+      const result = await res.json();
+      if (res.ok) {
+        showAlert('升级已撤销！');
+        loadPendingReminders();
+        loadReminderStats();
+        if (selectedBatchId.value) viewBatch(selectedBatchId.value);
+      } else {
+        showAlert(result.error || '撤销失败', 'error');
+      }
+    }
+
+    async function loadReviewReminders(reviewId) {
+      const res = await fetch(`${API}/reviews/${reviewId}/reminders`);
+      if (res.ok) {
+        reviewReminders.value = await res.json();
+      }
+    }
+
+    function openReminderModal(rv) {
+      editingReview.value = rv;
+      reminderReviewId.value = rv.id;
+      newReminder.value = { reason: '', expected_completion: '', urgency: 'NORMAL', is_escalated: false };
+      showReminderModal.value = true;
+    }
+
+    function openProcessReminderModal(rm) {
+      editingReminder.value = rm;
+      processReminderNote.value = '';
+      showProcessReminderModal.value = true;
+    }
+
+    function openReminderListModal(rv) {
+      editingReview.value = rv;
+      reminderReviewId.value = rv.id;
+      loadReviewReminders(rv.id);
+      showReminderListModal.value = true;
+    }
+
     async function addArchiveToBatch() {
       const res = await fetch(`${API}/batches/${selectedBatchId.value}/archives`, {
         method: 'POST',
@@ -1200,15 +1553,19 @@ createApp({
     onMounted(() => {
       fetchUsers();
       loadBatches();
+      loadReminderStats();
     });
 
     return {
       users, currentUserId, currentUser, batches, selectedBatchId, batchDetail,
-      activeTab, alert, newBatch, showAddArchiveModal, showAddBoxModal,
+      activeTopTab, alert, newBatch, showAddArchiveModal, showAddBoxModal,
       showRejectModalForBox, newArchive, newBoxNo, rejectReason,
       showCreateReviewModal, showUpdateReviewModal, showRejectReviewModal,
       showReopenReviewModal, editingReview, newReview, updateReviewData,
       rejectReviewReason, reopenReviewReason,
+      showReminderModal, showProcessReminderModal, showReminderListModal,
+      reminderReviewId, editingReminder, newReminder, processReminderNote,
+      pendingReminders, reminderStats, reviewReminders,
       exportRecords, currentStep, packedCount, canRegister, canExport,
       addArchive, removeArchive, registerBatch, viewBatch,
       isArchiveSelected, toggleArchive, getSelectedArchives, getBoxNoById,
@@ -1216,7 +1573,10 @@ createApp({
       revokeReject, addArchiveToBatch, createBox, exportBatch, downloadExport,
       openCreateReviewModal, createReview, openUpdateReviewModal, submitUpdateReview,
       applyForClose, openRejectReviewModal, submitRejectReview,
-      confirmCloseReview, openReopenReviewModal, submitReopenReview
+      confirmCloseReview, openReopenReviewModal, submitReopenReview,
+      createReminder, loadPendingReminders, loadReminderStats,
+      processReminder, revokeEscalation, loadReviewReminders,
+      openReminderModal, openProcessReminderModal, openReminderListModal
     };
   }
 }).mount('#app');
