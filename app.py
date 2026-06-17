@@ -418,6 +418,16 @@ def init_db():
                     recovery_action TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (config_id) REFERENCES connection_configs(id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    target_type TEXT,
+                    target_id INTEGER,
+                    operator_id INTEGER,
+                    detail TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (operator_id) REFERENCES users(id))''')
     
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
@@ -476,6 +486,106 @@ def get_users():
     for u in users:
         u['role_name'] = USER_ROLES.get(u['role'], u['role'])
     return jsonify(users)
+
+@app.route('/api/context', methods=['GET', 'POST'])
+def app_context():
+    """
+    统一上下文管理接口：
+    GET  - 恢复上次保存的上下文（当前操作人、当前批次、当前连接配置）
+    POST - 保存当前上下文到后端（用于重启后恢复）
+    """
+    db = get_db()
+    db.row_factory = dict_factory
+    if request.method == 'POST':
+        data = request.json or {}
+        operator_id, err = require_operator(data)
+        if err:
+            return err
+        selected_batch_id = data.get('selected_batch_id')
+        connection_config_id = data.get('connection_config_id')
+        if selected_batch_id is not None:
+            try:
+                selected_batch_id = int(selected_batch_id)
+            except (ValueError, TypeError):
+                return jsonify({'error': 'selected_batch_id 格式错误'}), 400
+            b = db.execute('SELECT id FROM batches WHERE id = ?', (selected_batch_id,)).fetchone()
+            if not b:
+                return jsonify({'error': f'selected_batch_id={selected_batch_id} 批次不存在'}), 404
+        if connection_config_id is not None:
+            try:
+                connection_config_id = int(connection_config_id)
+            except (ValueError, TypeError):
+                return jsonify({'error': 'connection_config_id 格式错误'}), 400
+            c = db.execute('SELECT id FROM connection_configs WHERE id = ?', (connection_config_id,)).fetchone()
+            if not c:
+                return jsonify({'error': f'connection_config_id={connection_config_id} 配置不存在'}), 404
+        db.execute('''INSERT INTO audit_logs (action, target_type, target_id, operator_id, detail)
+                      VALUES (?, ?, ?, ?, ?)''',
+                   ('SAVE_CONTEXT', 'APP', 0, operator_id,
+                    json.dumps({'selected_batch_id': selected_batch_id,
+                                'connection_config_id': connection_config_id}, ensure_ascii=False)))
+        db.commit()
+        op = db.execute('SELECT id, username, role FROM users WHERE id = ?', (operator_id,)).fetchone()
+        return jsonify({
+            'success': True,
+            'saved_at': datetime.now().isoformat(),
+            'current_operator_id': operator_id,
+            'current_operator_name': op['username'] if op else None,
+            'current_operator_role': op['role'] if op else None,
+            'selected_batch_id': selected_batch_id,
+            'connection_config_id': connection_config_id,
+            'message': '上下文已保存，刷新或重启后可自动恢复'
+        })
+    operator_id = request.args.get('operator_id', type=int)
+    recent = db.execute('''SELECT * FROM audit_logs 
+                           WHERE action = 'SAVE_CONTEXT' 
+                           ORDER BY created_at DESC LIMIT 1''').fetchone()
+    context_batch_id = None
+    context_config_id = None
+    context_operator_id = None
+    source = 'none'
+    if recent:
+        try:
+            detail = json.loads(recent['detail']) if recent.get('detail') else {}
+        except Exception:
+            detail = {}
+        context_batch_id = detail.get('selected_batch_id')
+        context_config_id = detail.get('connection_config_id')
+        context_operator_id = recent['operator_id']
+        source = 'last_saved'
+    default_config = db.execute('SELECT * FROM connection_configs WHERE is_default = 1 ORDER BY id LIMIT 1').fetchone()
+    if default_config:
+        enrich_connection_config(db, default_config)
+    users = db.execute('SELECT * FROM users ORDER BY id').fetchall()
+    for u in users:
+        u['role_name'] = USER_ROLES.get(u['role'], u['role'])
+    if context_operator_id is None and users:
+        context_operator_id = users[0]['id']
+        source = 'first_user_default'
+    op = db.execute('SELECT id, username, role FROM users WHERE id = ?',
+                    (operator_id or context_operator_id,)).fetchone() if (operator_id or context_operator_id) else None
+    effective_operator_id = operator_id if operator_id else context_operator_id
+    if operator_id:
+        source = 'query_param'
+    return jsonify({
+        'source': source,
+        'restored_from_audit': source == 'last_saved',
+        'current_operator_id': effective_operator_id,
+        'current_operator_name': op['username'] if op else None,
+        'current_operator_role': op['role'] if op else None,
+        'current_operator_role_name': USER_ROLES.get(op['role'], op['role']) if op else None,
+        'selected_batch_id': context_batch_id,
+        'connection_config_id': context_config_id,
+        'default_connection_config': default_config,
+        'available_users': users,
+        'last_saved_at': recent['created_at'] if recent else None,
+        'message': {
+            'last_saved': '已从上次保存的上下文恢复',
+            'first_user_default': '无历史上下文，默认选中第一个用户',
+            'query_param': '使用请求参数中指定的操作人',
+            'none': '无历史上下文，也没有用户数据'
+        }.get(source, '上下文已就绪')
+    })
 
 @app.route('/api/batches', methods=['GET'])
 def get_batches():
@@ -939,6 +1049,11 @@ def get_history(batch_id):
 def export_batch(batch_id):
     db = get_db()
     db.row_factory = dict_factory
+    if request.method == 'POST':
+        data_pre = request.json or {}
+        pre_op, pre_err = resolve_operator_id(data_pre, db)
+        if not pre_op:
+            return jsonify({'error': f'导出操作失败：{pre_err}'}), 400
     
     batch = db.execute('''SELECT b.*, u.username as creator_name
                          FROM batches b JOIN users u ON b.created_by = u.id
@@ -1118,16 +1233,29 @@ def export_batch(batch_id):
     content = output.getvalue()
     
     if request.method == 'POST':
-        data_post = request.json
+        data_post = request.json or {}
+        operator_id, err_msg = resolve_operator_id(data_post, db)
+        if not operator_id:
+            return jsonify({'error': f'导出操作失败：{err_msg}'}), 400
         cursor = db.execute('''INSERT INTO export_records (batch_id, file_name, content, exported_by)
                      VALUES (?, ?, ?, ?)''',
-                  (batch_id, f'{batch["batch_no"]}_移交清单.csv', content, data_post['operator_id']))
+                  (batch_id, f'{batch["batch_no"]}_移交清单.csv', content, operator_id))
         export_id = cursor.lastrowid
+        db.execute('''INSERT INTO audit_logs (action, target_type, target_id, operator_id, detail)
+                      VALUES (?, ?, ?, ?, ?)''',
+                   ('EXPORT_BATCH', 'BATCH', batch_id, operator_id,
+                    json.dumps({'export_id': export_id, 'file_name': f'{batch["batch_no"]}_移交清单.csv',
+                                'source': data_post.get('connection_config_id') and 'connection_config' or 'direct_operator'},
+                               ensure_ascii=False)))
         db.commit()
+        exporter = db.execute('SELECT username FROM users WHERE id = ?', (operator_id,)).fetchone()
         return jsonify({
             'success': True,
             'export_id': export_id,
             'file_name': f'{batch["batch_no"]}_移交清单.csv',
+            'exported_by': operator_id,
+            'exported_by_name': exporter['username'] if exporter else None,
+            'operator_source': 'connection_config' if data_post.get('connection_config_id') else 'direct_operator',
             'content': content
         })
     
@@ -2984,6 +3112,59 @@ def get_strategy_effective_version(strategy_id):
         'version_history': version_history
     })
 
+def require_operator(data=None, query=False):
+    """统一校验：从 request.json 或 request.args 中提取 operator_id，校验后返回 (operator_id, error_response)"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    if data is None:
+        if query:
+            data = request.args
+        else:
+            data = request.json or {}
+    operator_id = data.get('operator_id')
+    if operator_id is None or operator_id == '':
+        return None, (jsonify({'error': '缺少operator_id参数，该接口必须指定操作人'}), 400)
+    try:
+        operator_id = int(operator_id)
+    except (ValueError, TypeError):
+        return None, (jsonify({'error': 'operator_id参数格式错误，必须是有效的用户ID整数'}), 400)
+    op = db.execute('SELECT id, username, role FROM users WHERE id = ?', (operator_id,)).fetchone()
+    if not op:
+        return None, (jsonify({'error': f'operator_id={operator_id} 对应的用户不存在'}), 404)
+    return operator_id, None
+
+def resolve_operator_id(data, db):
+    """
+    解析操作人ID，支持两种来源（优先级从高到低）：
+    1. 显式传入的 operator_id
+    2. 通过 connection_config_id 从连接配置中获取 current_operator_id
+    返回 (operator_id, error_msg)，成功时 error_msg 为 None
+    """
+    operator_id = data.get('operator_id')
+    connection_config_id = data.get('connection_config_id')
+    if operator_id:
+        try:
+            operator_id = int(operator_id)
+        except (ValueError, TypeError):
+            return None, 'operator_id参数格式错误'
+        op = db.execute('SELECT id FROM users WHERE id = ?', (operator_id,)).fetchone()
+        if not op:
+            return None, f'operator_id={operator_id} 对应的用户不存在'
+        return operator_id, None
+    if connection_config_id:
+        try:
+            connection_config_id = int(connection_config_id)
+        except (ValueError, TypeError):
+            return None, 'connection_config_id参数格式错误'
+        cfg = db.execute('SELECT current_operator_id FROM connection_configs WHERE id = ?',
+                         (connection_config_id,)).fetchone()
+        if not cfg:
+            return None, f'connection_config_id={connection_config_id} 对应的连接配置不存在'
+        if not cfg['current_operator_id']:
+            return None, f'连接配置#{connection_config_id} 尚未设置当前操作人，请先在连接中心切换操作人'
+        return cfg['current_operator_id'], None
+    return None, '必须提供 operator_id 或 connection_config_id 参数之一'
+
 def enrich_connection_config(db, config):
     config['status_name'] = CONNECTION_STATUS_NAME.get(config.get('last_probe_status', 'UNKNOWN'), config.get('last_probe_status', 'UNKNOWN'))
     config['entry_url'] = f"{config['protocol']}://{config['service_host']}:{config['service_port']}{config['entry_path']}"
@@ -3462,46 +3643,65 @@ def get_connection_entry_url(config_id):
 
 @app.route('/api/connection/configs/<int:config_id>/switch-operator', methods=['POST'])
 def switch_connection_operator(config_id):
-    data = request.json
+    data = request.json or {}
     db = get_db()
     db.row_factory = dict_factory
-    operator_id = data.get('operator_id')
-    new_operator_id = data.get('new_operator_id')
-    if not operator_id or not new_operator_id:
-        return jsonify({'error': '缺少operator_id或new_operator_id参数'}), 400
-    
+    updated_by = data.get('updated_by') or data.get('operator_id')
+    target_operator_id = data.get('operator_id') if data.get('updated_by') else data.get('new_operator_id')
+    if not updated_by or not target_operator_id:
+        return jsonify({'error': '缺少参数：需同时提供 updated_by（执行切换的操作人）和 operator_id（切换到的目标操作人）'}), 400
+    try:
+        updated_by = int(updated_by)
+        target_operator_id = int(target_operator_id)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'operator_id 和 updated_by 必须是有效的用户ID整数'}), 400
+    updator = db.execute('SELECT id, username, role FROM users WHERE id = ?', (updated_by,)).fetchone()
+    if not updator:
+        return jsonify({'error': f'执行切换的操作人 updated_by={updated_by} 不存在'}), 404
     config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
     if not config:
         return jsonify({'error': '连接配置不存在'}), 404
-    
-    new_op = db.execute('SELECT * FROM users WHERE id = ?', (new_operator_id,)).fetchone()
+    new_op = db.execute('SELECT * FROM users WHERE id = ?', (target_operator_id,)).fetchone()
     if not new_op:
-        return jsonify({'error': '新操作人不存在'}), 404
-    
+        return jsonify({'error': f'目标操作人 operator_id={target_operator_id} 不存在'}), 404
+    old_operator_id = config['current_operator_id']
     old_version = config['config_version']
     new_version = old_version + 1
-    
     db.execute('''UPDATE connection_configs SET
                   current_operator_id = ?, config_version = ?,
                   updated_by = ?, updated_at = CURRENT_TIMESTAMP
                   WHERE id = ?''',
-               (new_operator_id, new_version, operator_id, config_id))
-    
-    save_connection_snapshot(db, config_id, operator_id, new_version)
+               (target_operator_id, new_version, updated_by, config_id))
+    save_connection_snapshot(db, config_id, updated_by, new_version)
+    old_op = db.execute('SELECT username FROM users WHERE id = ?', (old_operator_id,)).fetchone() if old_operator_id else None
     add_connection_log(db, config_id, config['profile_name'], CONNECTION_LOG_ACTION['SWITCH_OPERATOR'],
-                      operator_id,
-                      {'from_operator_id': config['current_operator_id'],
-                       'to_operator_id': new_operator_id,
+                      updated_by,
+                      {'from_operator_id': old_operator_id,
+                       'from_operator_name': old_op['username'] if old_op else None,
+                       'to_operator_id': target_operator_id,
                        'to_operator_name': new_op['username'],
                        'to_operator_role': new_op['role'],
-                       'version_change': f'v{old_version}→v{new_version}'})
+                       'version_change': f'v{old_version}→v{new_version}',
+                       'executed_by': updator['username']})
+    db.execute('''INSERT INTO audit_logs (action, target_type, target_id, operator_id, detail)
+                  VALUES (?, ?, ?, ?, ?)''',
+               ('SWITCH_OPERATOR', 'CONNECTION_CONFIG', config_id, updated_by,
+                json.dumps({'from_operator_id': old_operator_id,
+                            'to_operator_id': target_operator_id,
+                            'to_operator_name': new_op['username'],
+                            'config_name': config['profile_name']}, ensure_ascii=False)))
     db.commit()
     config = db.execute('SELECT * FROM connection_configs WHERE id = ?', (config_id,)).fetchone()
     enrich_connection_config(db, config)
     return jsonify({
         'config': config,
+        'current_operator_id': target_operator_id,
+        'current_operator_name': config['operator_name'],
+        'current_operator_role': config['operator_role'],
         'can_access_strategies': config['operator_role'] == 'RECEIVER',
-        'message': f'操作人已切换为 {config["operator_name"]} ({config["operator_role_name"]})'
+        'old_operator_id': old_operator_id,
+        'version_change': {'from': old_version, 'to': new_version},
+        'message': f'操作人已切换为 {config["operator_name"]} ({config["operator_role_name"]})，配置版本 v{old_version}→v{new_version}'
     })
 
 @app.route('/api/connection/export', methods=['GET'])

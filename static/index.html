@@ -249,9 +249,14 @@ tr:hover { background: #f8f9fa; }
     <div class="user-bar">
       <div class="user-select">
         <label>当前用户:</label>
-        <select v-model="currentUserId" style="padding: 8px 12px; border-radius: 6px; border: 1px solid #dde2eb; min-width: 150px;">
+        <select v-model="currentUserId" @change="(e) => setCurrentOperator(parseInt(e.target.value), {source: 'topbar_select'})"
+                style="padding: 8px 12px; border-radius: 6px; border: 1px solid #dde2eb; min-width: 150px;">
           <option v-for="u in users" :key="u.id" :value="u.id">{{ u.username }} ({{ u.role_name }})</option>
         </select>
+        <span v-if="appContext && appContext.currentOperatorId" style="font-size: 11px; color: #888; margin-left: 6px;">
+          (统一ID:{{ appContext.currentOperatorId }}
+          <span v-if="appContext._loadedFrom"> | 恢复自:{{ appContext._loadedFrom }}</span>)
+        </span>
         <span v-if="currentUser" :class="['role-tag', currentUser.role === 'SENDER' ? 'role-sender' : 'role-receiver']">
           {{ currentUser.role_name }}
         </span>
@@ -1962,6 +1967,129 @@ createApp({
     const exportRecords = ref([]);
     const activeTopTab = ref('batches');
     const alert = ref(null);
+
+    const appContext = ref({
+      currentOperatorId: null,
+      currentOperatorName: null,
+      currentOperatorRole: null,
+      selectedBatchId: null,
+      connectionConfigId: null,
+      _loadedFrom: 'initial'
+    });
+
+    const activeConnectionConfigId = computed(() => {
+      if (appContext.value.connectionConfigId) return appContext.value.connectionConfigId;
+      const def = connectionConfigs.value && connectionConfigs.value.find(c => c.is_default);
+      return def ? def.id : (connectionConfigs.value && connectionConfigs.value[0] && connectionConfigs.value[0].id);
+    });
+
+    const effectiveOperatorId = computed(() => {
+      if (appContext.value.currentOperatorId) return appContext.value.currentOperatorId;
+      if (selectedConnectionDetail.value && selectedConnectionDetail.value.config && selectedConnectionDetail.value.config.current_operator_id)
+        return selectedConnectionDetail.value.config.current_operator_id;
+      const activeCfgId = activeConnectionConfigId.value;
+      if (activeCfgId) {
+        const cfg = connectionConfigs.value.find(c => c.id === activeCfgId);
+        if (cfg && cfg.current_operator_id) return cfg.current_operator_id;
+      }
+      return currentUserId.value;
+    });
+
+    async function apiRequest(path, options = {}) {
+      const { method = 'GET', body, queryParams, autoInjectOperator = true, expectJson = true, rawResponse = false } = options;
+      let url = `${API}${path}`;
+      const allQuery = { ...(queryParams || {}) };
+      const allBody = body ? { ...body } : undefined;
+      if (autoInjectOperator) {
+        const opId = effectiveOperatorId.value;
+        if (method === 'GET') {
+          if (!allQuery.operator_id && opId) allQuery.operator_id = opId;
+        } else {
+          if (allBody && allBody.operator_id === undefined && opId) allBody.operator_id = opId;
+        }
+      }
+      const qs = new URLSearchParams();
+      Object.entries(allQuery).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') qs.append(k, v);
+      });
+      const qsStr = qs.toString();
+      if (qsStr) url += `?${qsStr}`;
+      const fetchOpts = { method, headers: {} };
+      if (allBody !== undefined) {
+        fetchOpts.headers['Content-Type'] = 'application/json';
+        fetchOpts.body = JSON.stringify(allBody);
+      }
+      console.log(`[apiRequest] ${method} ${url}`, fetchOpts.body ? JSON.parse(fetchOpts.body) : '');
+      const res = await fetch(url, fetchOpts);
+      let payload;
+      try { payload = expectJson ? await res.json() : null; } catch (_) { payload = null; }
+      console.log(`[apiRequest] ${method} ${path} -> ${res.status}`, payload || '(non-json)');
+      if (rawResponse) return { res, payload };
+      return { ok: res.ok, status: res.status, data: payload, res };
+    }
+
+    async function saveContext(reason = 'change') {
+      if (!appContext.value.currentOperatorId) return;
+      const payload = {
+        operator_id: appContext.value.currentOperatorId,
+        selected_batch_id: appContext.value.selectedBatchId || selectedBatchId.value || null,
+        connection_config_id: appContext.value.connectionConfigId || activeConnectionConfigId.value || null
+      };
+      try {
+        await apiRequest('/context', { method: 'POST', body: payload, autoInjectOperator: false });
+        try { localStorage.setItem('appContext', JSON.stringify(payload)); } catch (_) {}
+      } catch (e) {
+        console.warn('[saveContext] failed, fallback to localStorage only:', e.message);
+        try { localStorage.setItem('appContext', JSON.stringify(payload)); } catch (_) {}
+      }
+    }
+
+    async function setCurrentOperator(operatorId, { source = 'user', syncToConnectionConfig = true, connectionConfigId = null } = {}) {
+      const op = users.value.find(u => u.id === operatorId);
+      if (!op) return { ok: false, error: `用户ID=${operatorId}不存在` };
+      currentUserId.value = operatorId;
+      appContext.value.currentOperatorId = operatorId;
+      appContext.value.currentOperatorName = op.username;
+      appContext.value.currentOperatorRole = op.role;
+      try { localStorage.setItem('currentUserId', String(operatorId)); } catch (_) {}
+      const targetConfigId = connectionConfigId || activeConnectionConfigId.value;
+      let switchResult = null;
+      if (syncToConnectionConfig && targetConfigId) {
+        try {
+          const r = await apiRequest(`/connection/configs/${targetConfigId}/switch-operator`, {
+            method: 'POST',
+            body: { operator_id: operatorId, updated_by: operatorId },
+            autoInjectOperator: false
+          });
+          if (r.ok && r.data && r.data.config) {
+            const idx = connectionConfigs.value.findIndex(c => c.id === targetConfigId);
+            if (idx >= 0) connectionConfigs.value[idx] = r.data.config;
+            if (selectedConnectionDetail.value && selectedConnectionDetail.value.config && selectedConnectionDetail.value.config.id === targetConfigId) {
+              selectedConnectionDetail.value.config = r.data.config;
+            }
+            switchResult = r.data;
+          }
+        } catch (e) {
+          console.warn('[setCurrentOperator] sync to connection config failed:', e.message);
+        }
+      }
+      await saveContext('operator_switch');
+      return { ok: true, operator: op, switchResult };
+    }
+
+    function syncAppContextFromGlobals() {
+      if (!appContext.value.currentOperatorId && currentUserId.value) {
+        const op = users.value.find(u => u.id === currentUserId.value);
+        appContext.value.currentOperatorId = currentUserId.value;
+        if (op) {
+          appContext.value.currentOperatorName = op.username;
+          appContext.value.currentOperatorRole = op.role;
+        }
+      }
+      if (!appContext.value.selectedBatchId && selectedBatchId.value) {
+        appContext.value.selectedBatchId = selectedBatchId.value;
+      }
+    }
     
     const newBatch = ref({
       batch_no: '',
@@ -2058,10 +2186,12 @@ createApp({
 
     async function viewBatch(id) {
       selectedBatchId.value = id;
+      appContext.value.selectedBatchId = id;
       const res = await fetch(`${API}/batches/${id}`);
       batchDetail.value = await res.json();
       boxArchiveSelections.value = {};
       loadExportRecords(id);
+      saveContext('view_batch');
     }
 
     function addArchive() {
@@ -2583,15 +2713,37 @@ createApp({
     }
 
     async function exportBatch() {
-      await fetch(`${API}/batches/${selectedBatchId.value}/export`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator_id: currentUserId.value })
-      });
-      
-      window.location.href = `${API}/batches/${selectedBatchId.value}/export`;
-      showAlert('导出成功！');
-      loadExportRecords(selectedBatchId.value);
+      if (!selectedBatchId.value) {
+        showAlert('请先选择一个批次', 'error');
+        return;
+      }
+      const opId = effectiveOperatorId.value;
+      if (!opId) {
+        showAlert('当前没有可用的操作人，请先在顶部或连接中心选择操作人', 'error');
+        return;
+      }
+      const connCfgId = activeConnectionConfigId.value;
+      const postBody = { operator_id: opId };
+      if (connCfgId) postBody.connection_config_id = connCfgId;
+      try {
+        const r = await apiRequest(`/batches/${selectedBatchId.value}/export`, {
+          method: 'POST',
+          body: postBody,
+          autoInjectOperator: false
+        });
+        if (!r.ok) {
+          showAlert((r.data && r.data.error) || `导出失败 (HTTP ${r.status})`, 'error');
+          return;
+        }
+        const exportedByName = (r.data && r.data.exported_by_name) || (appContext.value.currentOperatorName);
+        const source = (r.data && r.data.operator_source) || 'unknown';
+        console.log(`[exportBatch] 批次#${selectedBatchId.value} 导出成功, exported_by=${r.data && r.data.exported_by} (${exportedByName}), source=${source}`);
+        window.location.href = `${API}/batches/${selectedBatchId.value}/export`;
+        showAlert(`✅ 导出成功！操作人：${exportedByName || opId}（来源：${source === 'connection_config' ? '连接配置操作人' : '当前操作人'}）`);
+        loadExportRecords(selectedBatchId.value);
+      } catch (e) {
+        showAlert('导出请求失败: ' + e.message, 'error');
+      }
     }
 
     async function loadExportRecords(batchId) {
@@ -3171,28 +3323,25 @@ createApp({
     }
 
     async function switchConnectionOperator() {
-      if (!selectedConnectionDetail.value || !connSwitchOperatorId.value) return;
-      try {
-        const configId = selectedConnectionDetail.value.config.id;
-        const res = await fetch(`${API}/connection/configs/${configId}/switch-operator`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            operator_id: connSwitchOperatorId.value,
-            updated_by: currentUserId.value
-          })
-        });
-        const result = await res.json();
-        if (res.ok) {
-          showAlert('操作人切换成功！');
-          connSwitchOperatorId.value = null;
-          loadConnectionDetail(configId);
-          loadConnectionConfigs();
-        } else {
-          showAlert(result.error || '切换失败', 'error');
-        }
-      } catch (e) {
-        showAlert('切换操作人失败: ' + e.message, 'error');
+      if (!selectedConnectionDetail.value || !connSwitchOperatorId.value) {
+        showAlert('请先选择目标操作人', 'error');
+        return;
+      }
+      const configId = selectedConnectionDetail.value.config.id;
+      const targetId = connSwitchOperatorId.value;
+      const r = await setCurrentOperator(targetId, {
+        source: 'connection_center',
+        syncToConnectionConfig: true,
+        connectionConfigId: configId
+      });
+      if (r.ok) {
+        const msg = r.switchResult && r.switchResult.message ? r.switchResult.message : '操作人切换成功！';
+        showAlert(`✅ ${msg}`);
+        connSwitchOperatorId.value = null;
+        loadConnectionDetail(configId);
+        loadConnectionConfigs();
+      } else {
+        showAlert(r.error || '切换失败', 'error');
       }
     }
 
@@ -3425,10 +3574,69 @@ createApp({
       return JSON.stringify(data, null, 2);
     }
 
-    onMounted(() => {
-      fetchUsers();
-      loadBatches();
-      loadReminderStats();
+    async function restoreContext() {
+      let localCtx = null;
+      try {
+        const raw = localStorage.getItem('appContext');
+        if (raw) localCtx = JSON.parse(raw);
+      } catch (_) { localCtx = null; }
+      try {
+        const res = await fetch(`${API}/context${localCtx && localCtx.currentOperatorId ? `?operator_id=${localCtx.currentOperatorId}` : ''}`);
+        if (res.ok) {
+          const data = await res.json();
+          console.log('[restoreContext] from /api/context:', data);
+          if (data && data.current_operator_id) {
+            appContext.value.currentOperatorId = data.current_operator_id;
+            appContext.value.currentOperatorName = data.current_operator_name;
+            appContext.value.currentOperatorRole = data.current_operator_role;
+            currentUserId.value = data.current_operator_id;
+          }
+          if (data && data.selected_batch_id && !selectedBatchId.value) {
+            selectedBatchId.value = data.selected_batch_id;
+            appContext.value.selectedBatchId = data.selected_batch_id;
+          }
+          if (data && data.connection_config_id) {
+            appContext.value.connectionConfigId = data.connection_config_id;
+          }
+          appContext.value._loadedFrom = data.source || 'api';
+        } else if (localCtx) {
+          if (localCtx.operator_id) {
+            appContext.value.currentOperatorId = localCtx.operator_id;
+            currentUserId.value = localCtx.operator_id;
+          }
+          if (localCtx.selected_batch_id && !selectedBatchId.value) {
+            selectedBatchId.value = localCtx.selected_batch_id;
+            appContext.value.selectedBatchId = localCtx.selected_batch_id;
+          }
+          if (localCtx.connection_config_id) {
+            appContext.value.connectionConfigId = localCtx.connection_config_id;
+          }
+          appContext.value._loadedFrom = 'localStorage';
+        }
+      } catch (e) {
+        console.warn('[restoreContext] failed:', e.message);
+        if (localCtx) {
+          if (localCtx.operator_id) {
+            appContext.value.currentOperatorId = localCtx.operator_id;
+            currentUserId.value = localCtx.operator_id;
+          }
+          appContext.value._loadedFrom = 'localStorage_fallback';
+        }
+      }
+    }
+
+    onMounted(async () => {
+      await fetchUsers();
+      await restoreContext();
+      syncAppContextFromGlobals();
+      await Promise.all([
+        loadBatches(),
+        loadConnectionConfigs(),
+        loadReminderStats()
+      ]);
+      if (appContext.value.selectedBatchId) {
+        try { await viewBatch(appContext.value.selectedBatchId); } catch (_) {}
+      }
     });
 
     return {
@@ -3473,7 +3681,9 @@ createApp({
       publishConnectionConfig, rollbackConnectionConfig, rollbackConnectionToVersion,
       loadConnectionLogs, exportConnectionConfigs, copyConnExportResult,
       importConnectionConfigs, resolveConflict, resolveConflictWithNewName,
-      finalizeImport, toggleSnapshotView, formatSnapshotData
+      finalizeImport, toggleSnapshotView, formatSnapshotData,
+      appContext, activeConnectionConfigId, effectiveOperatorId,
+      setCurrentOperator, saveContext, apiRequest, restoreContext
     };
   }
 }).mount('#app');
